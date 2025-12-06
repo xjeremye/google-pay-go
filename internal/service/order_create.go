@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/golang-pay-core/config"
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/plugin"
@@ -15,17 +16,26 @@ import (
 	"gorm.io/gorm"
 )
 
+// isValidJSON 检查字符串是否为有效的 JSON
+func isValidJSON(s string) bool {
+	if s == "" {
+		return false
+	}
+	var js interface{}
+	return json.Unmarshal([]byte(s), &js) == nil
+}
+
 // CreateOrderRequest 创建订单请求
 type CreateOrderRequest struct {
-	OutOrderNo  string                 `json:"mchOrderNo" binding:"required"`  // 商户订单号
+	OutOrderNo  string                 `json:"mchOrderNo" binding:"required"`   // 商户订单号
 	MerchantID  int                    `json:"mchId" binding:"required"`        // 商户ID
-	ChannelID   int                    `json:"channelId" binding:"required"`     // 渠道ID
-	Money       int                    `json:"amount" binding:"required,min=1"`  // 金额（分）
-	NotifyURL   string                 `json:"notifyUrl" binding:"required"`   // 通知地址
+	ChannelID   int                    `json:"channelId" binding:"required"`    // 渠道ID
+	Money       int                    `json:"amount" binding:"required,min=1"` // 金额（分）
+	NotifyURL   string                 `json:"notifyUrl" binding:"required"`    // 通知地址
 	JumpURL     string                 `json:"jumpUrl"`                         // 跳转地址
-	Extra       string                 `json:"extra"`                          // 额外参数
+	Extra       string                 `json:"extra"`                           // 额外参数
 	Compatible  int                    `json:"compatible"`                      // 兼容模式 0/1
-	Test        bool                   `json:"test"`                             // 测试模式
+	Test        bool                   `json:"test"`                            // 测试模式
 	Sign        string                 `json:"sign" binding:"required"`         // 签名
 	RawSignData map[string]interface{} `json:"-"`                               // 原始签名数据（内部使用）
 }
@@ -84,26 +94,26 @@ type OrderCreateContext struct {
 }
 
 // 实现 plugin.OrderContext 接口
-func (o *OrderCreateContext) GetOutOrderNo() string              { return o.OutOrderNo }
-func (o *OrderCreateContext) GetNotifyURL() string                { return o.NotifyURL }
-func (o *OrderCreateContext) GetMoney() int                       { return o.Money }
-func (o *OrderCreateContext) GetJumpURL() string                  { return o.JumpURL }
-func (o *OrderCreateContext) GetNotifyMoney() int                 { return o.NotifyMoney }
-func (o *OrderCreateContext) GetExtra() string                    { return o.Extra }
-func (o *OrderCreateContext) GetCompatible() int                  { return o.Compatible }
-func (o *OrderCreateContext) GetTest() bool                       { return o.Test }
-func (o *OrderCreateContext) GetMerchantID() int64                 { return o.MerchantID }
-func (o *OrderCreateContext) GetTenantID() int64                   { return o.TenantID }
-func (o *OrderCreateContext) GetChannelID() int64                 { return o.ChannelID }
-func (o *OrderCreateContext) GetPluginID() int64                  { return o.PluginID }
-func (o *OrderCreateContext) GetPluginType() string               { return o.PluginType }
-func (o *OrderCreateContext) GetPluginUpstream() int              { return o.PluginUpstream }
-func (o *OrderCreateContext) GetDomainID() *int64                 { return o.DomainID }
-func (o *OrderCreateContext) GetDomainURL() string               { return o.DomainURL }
-func (o *OrderCreateContext) GetOrderNo() string                  { return o.OrderNo }
-func (o *OrderCreateContext) SetOrderNo(no string)                { o.OrderNo = no }
-func (o *OrderCreateContext) SetDomainID(id int64)                { o.DomainID = &id }
-func (o *OrderCreateContext) SetDomainURL(url string)             { o.DomainURL = url }
+func (o *OrderCreateContext) GetOutOrderNo() string   { return o.OutOrderNo }
+func (o *OrderCreateContext) GetNotifyURL() string    { return o.NotifyURL }
+func (o *OrderCreateContext) GetMoney() int           { return o.Money }
+func (o *OrderCreateContext) GetJumpURL() string      { return o.JumpURL }
+func (o *OrderCreateContext) GetNotifyMoney() int     { return o.NotifyMoney }
+func (o *OrderCreateContext) GetExtra() string        { return o.Extra }
+func (o *OrderCreateContext) GetCompatible() int      { return o.Compatible }
+func (o *OrderCreateContext) GetTest() bool           { return o.Test }
+func (o *OrderCreateContext) GetMerchantID() int64    { return o.MerchantID }
+func (o *OrderCreateContext) GetTenantID() int64      { return o.TenantID }
+func (o *OrderCreateContext) GetChannelID() int64     { return o.ChannelID }
+func (o *OrderCreateContext) GetPluginID() int64      { return o.PluginID }
+func (o *OrderCreateContext) GetPluginType() string   { return o.PluginType }
+func (o *OrderCreateContext) GetPluginUpstream() int  { return o.PluginUpstream }
+func (o *OrderCreateContext) GetDomainID() *int64     { return o.DomainID }
+func (o *OrderCreateContext) GetDomainURL() string    { return o.DomainURL }
+func (o *OrderCreateContext) GetOrderNo() string      { return o.OrderNo }
+func (o *OrderCreateContext) SetOrderNo(no string)    { o.OrderNo = no }
+func (o *OrderCreateContext) SetDomainID(id int64)    { o.DomainID = &id }
+func (o *OrderCreateContext) SetDomainURL(url string) { o.DomainURL = url }
 
 // OrderService 订单服务（重构版）
 type OrderService struct {
@@ -117,10 +127,10 @@ type OrderService struct {
 func NewOrderService() *OrderService {
 	pluginMgr := plugin.NewManager(database.RDB)
 	pluginSvc := NewPluginService()
-	
+
 	// 设置插件信息提供者（实现 PluginInfoProvider 接口）
 	pluginMgr.SetInfoProvider(&pluginInfoProviderAdapter{service: pluginSvc})
-	
+
 	return &OrderService{
 		cacheService:  NewCacheService(),
 		pluginService: pluginSvc,
@@ -147,7 +157,7 @@ func (a *pluginInfoProviderAdapter) GetPluginPayTypes(ctx context.Context, plugi
 	if err != nil {
 		return nil, err
 	}
-	
+
 	result := make([]interface{}, len(payTypes))
 	for i, pt := range payTypes {
 		result[i] = map[string]interface{}{
@@ -289,6 +299,11 @@ func (s *OrderService) validateSign(ctx context.Context, orderCtx *OrderCreateCo
 
 	_, actualSign := utils.GetSign(rawSignData, orderCtx.SignKey, nil, nil, orderCtx.Compatible)
 	if sign != actualSign {
+		// 如果是开发、测试模式则输出正确签名
+		if config.Cfg.App.Mode == "debug" || config.Cfg.App.Mode == "test" {
+			fmt.Println("sign", sign)
+			fmt.Println("actualSign", actualSign)
+		}
 		return ErrSignInvalid
 	}
 
@@ -491,17 +506,17 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 
 	// 创建订单
 	order := &models.Order{
-		ID:            orderCtx.OrderID,
-		OrderNo:       orderCtx.OrderNo,
-		OutOrderNo:    orderCtx.OutOrderNo,
-		OrderStatus:   models.OrderStatusPending,
-		Money:         orderCtx.Money,
-		Tax:           orderCtx.Tax,
+		ID:             orderCtx.OrderID,
+		OrderNo:        orderCtx.OrderNo,
+		OutOrderNo:     orderCtx.OutOrderNo,
+		OrderStatus:    models.OrderStatusPending,
+		Money:          orderCtx.Money,
+		Tax:            orderCtx.Tax,
 		CreateDatetime: &now,
-		Compatible:    orderCtx.Compatible,
-		Ver:           1,
-		MerchantID:    &orderCtx.MerchantID,
-		PayChannelID:  &orderCtx.ChannelID,
+		Compatible:     orderCtx.Compatible,
+		Ver:            1,
+		MerchantID:     &orderCtx.MerchantID,
+		PayChannelID:   &orderCtx.ChannelID,
 	}
 
 	if err := tx.Create(order).Error; err != nil {
@@ -510,15 +525,28 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 	}
 
 	// 创建订单详情
+	// 处理 Extra 字段：如果为空字符串，设置为 NULL 或有效的 JSON
+	extraValue := orderCtx.Extra
+	if extraValue == "" {
+		// 空字符串时，设置为有效的空 JSON 对象
+		extraValue = "{}"
+	} else {
+		// 验证是否为有效的 JSON，如果不是则包装为 JSON 字符串
+		if !isValidJSON(extraValue) {
+			// 如果不是有效的 JSON，将其作为字符串值包装在 JSON 中
+			extraValue = fmt.Sprintf(`{"value":%q}`, extraValue)
+		}
+	}
+
 	orderDetail := &models.OrderDetail{
-		OrderID:       orderCtx.OrderID,
-		NotifyURL:     orderCtx.NotifyURL,
-		JumpURL:       orderCtx.JumpURL,
-		NotifyMoney:   orderCtx.NotifyMoney,
+		OrderID:        orderCtx.OrderID,
+		NotifyURL:      orderCtx.NotifyURL,
+		JumpURL:        orderCtx.JumpURL,
+		NotifyMoney:    orderCtx.NotifyMoney,
 		CreateDatetime: &now,
-		Extra:         orderCtx.Extra,
-		PluginID:      &orderCtx.PluginID,
-		DomainID:      orderCtx.DomainID,
+		Extra:          extraValue,
+		PluginID:       &orderCtx.PluginID,
+		DomainID:       orderCtx.DomainID,
 	}
 
 	if err := tx.Create(orderDetail).Error; err != nil {
@@ -689,7 +717,7 @@ func (s *OrderService) UpdateOrderStatus(orderID string, status int, ticketNo st
 	}
 
 	updates := map[string]interface{}{
-		"order_status":   status,
+		"order_status":    status,
 		"update_datetime": &now,
 	}
 
@@ -713,4 +741,3 @@ func (s *OrderService) UpdateOrderStatus(orderID string, status int, ticketNo st
 
 	return nil
 }
-

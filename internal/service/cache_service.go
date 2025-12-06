@@ -27,7 +27,7 @@ func NewCacheService() *CacheService {
 // GetMerchantWithUser 获取商户及其用户信息（带缓存）
 func (s *CacheService) GetMerchantWithUser(ctx context.Context, merchantID int64) (*models.Merchant, *SystemUser, error) {
 	cacheKey := fmt.Sprintf("merchant:%d", merchantID)
-	
+
 	// 尝试从缓存获取
 	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
 		var merchant models.Merchant
@@ -68,7 +68,7 @@ func (s *CacheService) GetMerchantWithUser(ctx context.Context, merchantID int64
 // GetUser 获取系统用户信息（带缓存）
 func (s *CacheService) GetUser(ctx context.Context, userID int64) (*SystemUser, error) {
 	cacheKey := fmt.Sprintf("user:%d", userID)
-	
+
 	// 尝试从缓存获取
 	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
 		var user SystemUser
@@ -80,7 +80,6 @@ func (s *CacheService) GetUser(ctx context.Context, userID int64) (*SystemUser, 
 	// 从数据库获取
 	var user SystemUser
 	if err := database.DB.Table("dvadmin_system_users").
-		Select("id, key, status").
 		First(&user, userID).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil, fmt.Errorf("用户不存在")
@@ -99,7 +98,7 @@ func (s *CacheService) GetUser(ctx context.Context, userID int64) (*SystemUser, 
 // GetTenantWithUser 获取租户及其用户信息（带缓存）
 func (s *CacheService) GetTenantWithUser(ctx context.Context, tenantID int64) (*models.Tenant, *SystemUser, error) {
 	cacheKey := fmt.Sprintf("tenant:%d", tenantID)
-	
+
 	// 尝试从缓存获取
 	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
 		var tenant models.Tenant
@@ -110,7 +109,7 @@ func (s *CacheService) GetTenantWithUser(ctx context.Context, tenantID int64) (*
 				Where("id = ?", tenantID).
 				Select("system_user_id").
 				Scan(&systemUserID)
-			
+
 			if systemUserID != nil {
 				user, err := s.GetUser(ctx, *systemUserID)
 				if err == nil {
@@ -140,7 +139,7 @@ func (s *CacheService) GetTenantWithUser(ctx context.Context, tenantID int64) (*
 		Where("id = ?", tenantID).
 		Select("system_user_id").
 		Scan(&systemUserID)
-	
+
 	var user *SystemUser
 	if systemUserID != nil {
 		user, _ = s.GetUser(ctx, *systemUserID)
@@ -152,7 +151,7 @@ func (s *CacheService) GetTenantWithUser(ctx context.Context, tenantID int64) (*
 // GetPayChannel 获取支付渠道信息（带缓存）
 func (s *CacheService) GetPayChannel(ctx context.Context, channelID int64) (*models.PayChannel, error) {
 	cacheKey := fmt.Sprintf("channel:%d", channelID)
-	
+
 	// 尝试从缓存获取
 	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
 		var channel models.PayChannel
@@ -184,4 +183,3 @@ type SystemUser struct {
 	Key    string `json:"key"`
 	Status bool   `json:"status"`
 }
-

@@ -12,10 +12,10 @@ var Cfg *Config
 
 // Config 应用配置结构
 type Config struct {
-	App       AppConfig       `mapstructure:"app"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	Redis     RedisConfig     `mapstructure:"redis"`
-	Log       LogConfig       `mapstructure:"log"`
+	App        AppConfig        `mapstructure:"app"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	Log        LogConfig        `mapstructure:"log"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 }
 
@@ -67,9 +67,9 @@ type LogConfig struct {
 
 // MonitoringConfig 监控配置
 type MonitoringConfig struct {
-	MetricsToken        string   `mapstructure:"metrics_token"`         // Prometheus 指标端点 Token
-	MetricsIPWhitelist  []string `mapstructure:"metrics_ip_whitelist"`   // Prometheus 指标端点 IP 白名单
-	SwaggerEnabled      bool     `mapstructure:"swagger_enabled"`       // 是否启用 Swagger（生产环境可关闭）
+	MetricsToken       string   `mapstructure:"metrics_token"`        // Prometheus 指标端点 Token
+	MetricsIPWhitelist []string `mapstructure:"metrics_ip_whitelist"` // Prometheus 指标端点 IP 白名单
+	SwaggerEnabled     bool     `mapstructure:"swagger_enabled"`      // 是否启用 Swagger（生产环境可关闭）
 }
 
 // Load 加载配置文件
@@ -82,7 +82,7 @@ func Load(configPath string) error {
 		if env == "" {
 			env = "dev" // 默认使用开发环境
 		}
-		
+
 		switch env {
 		case "prod", "production":
 			configPath = "config/config.prod.yaml"
@@ -123,7 +123,7 @@ func Load(configPath string) error {
 func setDefaults() {
 	viper.SetDefault("app.name", "golang-pay-core")
 	viper.SetDefault("app.port", 8080)
-	viper.SetDefault("app.mode", "release")
+	viper.SetDefault("app.mode", os.Getenv("APP_MODE"))
 	viper.SetDefault("database.max_idle_conns", 10)
 	viper.SetDefault("database.max_open_conns", 100)
 	viper.SetDefault("redis.pool_size", 10)
@@ -141,4 +141,3 @@ func (c *DatabaseConfig) GetDSN() string {
 func (c *RedisConfig) GetAddr() string {
 	return fmt.Sprintf("%s:%d", c.Host, c.Port)
 }
-
