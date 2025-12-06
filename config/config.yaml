@@ -43,3 +43,13 @@ log:
   max_backups: 7
   max_age: 30 # days
   compress: true
+
+# 监控配置
+monitoring:
+  # Prometheus 指标端点安全配置
+  metrics_token: ""              # 指标端点访问 Token（留空表示不启用 Token 认证）
+  metrics_ip_whitelist:          # IP 白名单（留空表示允许所有 IP，生产环境建议配置）
+    - "127.0.0.1"                # 本地访问
+    - "::1"                      # IPv6 本地访问
+    # - "192.168.1.0/24"         # 内网段（取消注释启用）
+  swagger_enabled: true          # 是否启用 Swagger（生产环境建议设为 false）

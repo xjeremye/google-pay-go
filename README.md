@@ -190,11 +190,35 @@ swag init -g main.go -o docs --parseDependency --parseInternal
 http://localhost:8080/metrics
 ```
 
+**安全保护**: `/metrics` 端点支持 Token 认证和 IP 白名单保护，详细配置请查看 [监控端点安全指南](./docs/metrics_security.md)
+
 监控指标包括：
 - HTTP 请求总数和持续时间
 - 请求/响应大小
 - 当前并发请求数
 - 数据库和 Redis 连接状态
+
+#### 监控 UI 界面
+
+项目提供了完整的监控 UI 界面：
+
+1. **Prometheus Web UI** - http://localhost:9090
+   - 查询和可视化指标
+   - 查看告警规则
+
+2. **Grafana** - http://localhost:3000 (推荐)
+   - 强大的可视化仪表板
+   - 自定义图表和告警
+
+3. **Alertmanager** - http://localhost:9093
+   - 告警管理界面
+
+快速启动监控栈：
+```bash
+./scripts/start-monitoring.sh
+```
+
+详细配置请查看 [监控告警 UI 界面指南](./docs/monitoring_ui.md)
 
 ### 健康检查
 

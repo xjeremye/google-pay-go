@@ -1,0 +1,51 @@
+global:
+  scrape_interval: 15s      # 抓取间隔
+  evaluation_interval: 15s  # 规则评估间隔
+  external_labels:
+    cluster: 'golang-pay-core'
+    environment: 'production'
+
+# 告警规则文件
+rule_files:
+  - 'alerts.yml'
+
+# Alertmanager 配置
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+# 抓取配置
+scrape_configs:
+  # 应用指标
+  - job_name: 'golang-pay-core'
+    scrape_interval: 5s
+    metrics_path: '/metrics'
+    # 如果应用配置了 metrics_token，需要在这里配置认证
+    # 方式一：使用查询参数（简单，但 Token 会出现在日志中）
+    # params:
+    #   token: ['your-metrics-token-here']
+    
+    # 方式二：使用 Bearer Token（推荐，更安全）
+    # bearer_token: 'your-metrics-token-here'
+    
+    # 方式三：使用 Basic Auth
+    # basic_auth:
+    #   username: 'prometheus'
+    #   password: 'your-metrics-token-here'
+    
+    # 如果使用 IP 白名单且 Prometheus 在内网，可以不配置认证
+    static_configs:
+      - targets: ['host.docker.internal:8080']  # Docker 环境使用
+        # - targets: ['localhost:8080']          # 本地环境使用
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'golang-pay-core:8080'
+
+  # Prometheus 自身指标
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+

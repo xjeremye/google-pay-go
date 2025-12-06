@@ -12,10 +12,11 @@ var Cfg *Config
 
 // Config 应用配置结构
 type Config struct {
-	App     AppConfig     `mapstructure:"app"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Redis   RedisConfig   `mapstructure:"redis"`
-	Log     LogConfig     `mapstructure:"log"`
+	App       AppConfig       `mapstructure:"app"`
+	Database  DatabaseConfig  `mapstructure:"database"`
+	Redis     RedisConfig     `mapstructure:"redis"`
+	Log       LogConfig       `mapstructure:"log"`
+	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 }
 
 // AppConfig 应用配置
@@ -62,6 +63,13 @@ type LogConfig struct {
 	MaxBackups int    `mapstructure:"max_backups"`
 	MaxAge     int    `mapstructure:"max_age"`
 	Compress   bool   `mapstructure:"compress"`
+}
+
+// MonitoringConfig 监控配置
+type MonitoringConfig struct {
+	MetricsToken        string   `mapstructure:"metrics_token"`         // Prometheus 指标端点 Token
+	MetricsIPWhitelist  []string `mapstructure:"metrics_ip_whitelist"`   // Prometheus 指标端点 IP 白名单
+	SwaggerEnabled      bool     `mapstructure:"swagger_enabled"`       // 是否启用 Swagger（生产环境可关闭）
 }
 
 // Load 加载配置文件
@@ -120,6 +128,7 @@ func setDefaults() {
 	viper.SetDefault("database.max_open_conns", 100)
 	viper.SetDefault("redis.pool_size", 10)
 	viper.SetDefault("log.level", "info")
+	viper.SetDefault("monitoring.swagger_enabled", true)
 }
 
 // GetDSN 获取数据库连接字符串

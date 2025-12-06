@@ -40,3 +40,11 @@ log:
   max_age: 7               # 测试环境保留较短时间
   compress: false          # 测试环境不压缩
 
+# 监控配置（测试环境）
+monitoring:
+  metrics_token: "test-metrics-token"
+  metrics_ip_whitelist:
+    - "127.0.0.1"
+    - "::1"
+  swagger_enabled: true
+

@@ -23,11 +23,15 @@ func SetupRouter() *gin.Engine {
 	r.Use(middleware.CORS())
 	r.Use(middleware.Metrics()) // Prometheus 监控中间件
 
-	// Swagger 文档
-	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	// Swagger 文档（根据配置决定是否启用）
+	if config.Cfg.Monitoring.SwaggerEnabled {
+		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	}
 
-	// Prometheus 指标端点
-	r.GET("/metrics", middleware.PrometheusHandler())
+	// Prometheus 指标端点（需要认证）
+	metricsGroup := r.Group("/metrics")
+	metricsGroup.Use(middleware.MetricsAuth()) // 添加认证中间件
+	metricsGroup.GET("", middleware.PrometheusHandler())
 
 	// 健康检查（增强版）
 	r.GET("/health", healthCheck)

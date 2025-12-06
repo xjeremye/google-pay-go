@@ -40,3 +40,14 @@ log:
   max_age: 90              # 保留更长时间
   compress: true
 
+# 监控配置（生产环境）
+monitoring:
+  # Prometheus 指标端点安全配置
+  metrics_token: "your-metrics-token-change-in-production"  # 生产环境必须设置强 Token
+  metrics_ip_whitelist:          # IP 白名单（生产环境建议配置内网 IP）
+    - "127.0.0.1"                # 本地访问
+    - "10.0.0.0/8"               # 内网段（根据实际网络调整）
+    - "172.16.0.0/12"            # 内网段
+    - "192.168.0.0/16"           # 内网段
+  swagger_enabled: false         # 生产环境关闭 Swagger
+

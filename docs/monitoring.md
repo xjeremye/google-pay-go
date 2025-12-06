@@ -74,6 +74,50 @@ func (c *OrderController) CreateOrder(ctx *gin.Context) {
 http://localhost:8080/metrics
 ```
 
+**⚠️ 安全提示**: `/metrics` 端点默认需要 Token 认证或 IP 白名单保护。详细配置请查看 [监控端点安全指南](./metrics_security.md)
+
+### 安全访问方式
+
+**方式一：Token 认证（推荐）**
+```bash
+# 使用 Authorization 头
+curl -H "Authorization: Bearer your-metrics-token" \
+  http://localhost:8080/metrics
+
+# 或使用查询参数
+curl http://localhost:8080/metrics?token=your-metrics-token
+```
+
+**方式二：IP 白名单**
+配置允许的 IP 地址后，可直接访问（仅限白名单 IP）
+
+### 监控 UI 界面
+
+项目支持多种监控 UI 界面，详细说明请查看 [监控告警 UI 界面指南](./monitoring_ui.md)：
+
+1. **Prometheus Web UI** - http://localhost:9090
+   - Prometheus 自带的查询和可视化界面
+   - 支持 PromQL 查询
+   - 查看告警规则状态
+
+2. **Grafana** - http://localhost:3000 (推荐)
+   - 强大的可视化仪表板
+   - 自定义图表和告警
+   - 支持多种数据源
+
+3. **Alertmanager** - http://localhost:9093
+   - 告警管理界面
+   - 告警路由和抑制规则
+
+快速启动监控栈：
+```bash
+# 使用 Docker Compose
+./scripts/start-monitoring.sh
+
+# 或手动启动
+docker-compose -f docker-compose.monitoring.yml up -d
+```
+
 ### 监控指标说明
 
 #### HTTP 请求指标

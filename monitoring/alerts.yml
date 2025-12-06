@@ -1,0 +1,54 @@
+groups:
+  - name: golang-pay-core
+    interval: 30s
+    rules:
+      # 高错误率告警
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m])) 
+          / 
+          sum(rate(http_requests_total[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          service: golang-pay-core
+        annotations:
+          summary: "错误率过高"
+          description: "服务 {{ $labels.instance }} 的错误率超过 1%，当前值: {{ $value | humanizePercentage }}"
+
+      # 高延迟告警
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: golang-pay-core
+        annotations:
+          summary: "请求延迟过高"
+          description: "服务 {{ $labels.instance }} 的 P95 延迟超过 1 秒，当前值: {{ $value }}s"
+
+      # 服务不可用告警
+      - alert: ServiceDown
+        expr: up{job="golang-pay-core"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: golang-pay-core
+        annotations:
+          summary: "服务不可用"
+          description: "服务 {{ $labels.instance }} 已下线超过 1 分钟"
+
+      # 高并发告警
+      - alert: HighConcurrency
+        expr: http_requests_in_flight > 1000
+        for: 5m
+        labels:
+          severity: warning
+          service: golang-pay-core
+        annotations:
+          summary: "并发请求数过高"
+          description: "服务 {{ $labels.instance }} 的并发请求数超过 1000，当前值: {{ $value }}"
+
