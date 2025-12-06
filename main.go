@@ -29,6 +29,7 @@ import (
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/router"
+	"github.com/golang-pay-core/internal/service"
 	"go.uber.org/zap"
 
 	_ "github.com/golang-pay-core/docs" // Swagger 文档
@@ -77,6 +78,12 @@ func main() {
 		// Redis 不是必须的，可以继续运行
 	}
 	defer database.CloseRedis()
+
+	// 启动缓存刷新服务（每秒刷新一次热点数据）
+	cacheRefreshService := service.NewCacheRefreshService()
+	refreshCtx := context.Background()
+	go cacheRefreshService.Start(refreshCtx)
+	logger.Logger.Info("缓存刷新服务已启动（每秒刷新一次热点数据）")
 
 	// 设置路由
 	r := router.SetupRouter()

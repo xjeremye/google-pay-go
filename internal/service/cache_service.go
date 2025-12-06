@@ -179,7 +179,8 @@ func (s *CacheService) GetPayChannel(ctx context.Context, channelID int64) (*mod
 
 // SystemUser 系统用户模型（用于查询）
 type SystemUser struct {
-	ID     int64  `json:"id"`
-	Key    string `json:"key"`
-	Status bool   `json:"status"`
+	ID       int64  `json:"id"`
+	Key      string `json:"key"`
+	Status   bool   `json:"status"`
+	IsActive bool   `json:"is_active"`
 }
