@@ -24,38 +24,64 @@ func NewOrderController() *OrderController {
 	}
 }
 
-// CreateOrder 创建订单
+// CreateOrder 创建订单（支持 POST 和 GET）
 // @Summary 创建订单
-// @Description 创建支付订单
+// @Description 创建支付订单，支持以下方式：1. POST JSON 2. POST Form 3. GET Query String
 // @Tags 订单
 // @Accept json
+// @Accept x-www-form-urlencoded
 // @Produce json
-// @Param request body CreateOrderRequest true "订单信息"
+// @Param mchId query int false "商户ID" example:"1"
+// @Param channelId query int false "渠道ID" example:"1"
+// @Param mchOrderNo query string false "商户订单号" example:"ORD20240101001"
+// @Param amount query int false "金额（分）" example:"10000"
+// @Param notifyUrl query string false "通知地址" example:"https://example.com/notify"
+// @Param jumpUrl query string false "跳转地址" example:"https://example.com/jump"
+// @Param extra query string false "额外参数" example:"{}"
+// @Param compatible query int false "兼容模式 0/1" example:"0"
+// @Param test query bool false "测试模式" example:"false"
+// @Param sign query string false "签名" example:"ABC123..."
+// @Param request body CreateOrderRequest false "订单信息（POST 方式）"
 // @Success 200 {object} response.Response{data=object} "成功"
 // @Failure 400 {object} response.Response "参数错误"
 // @Failure 500 {object} response.Response "服务器错误"
 // @Router /api/v1/orders [post]
+// @Router /api/v1/orders [get]
 func (c *OrderController) CreateOrder(ctx *gin.Context) {
 	var req service.CreateOrderRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.Fail(ctx, http.StatusBadRequest, "参数错误: "+err.Error())
-		return
+	var rawSignData map[string]interface{}
+
+	// 根据请求方法选择不同的参数绑定方式
+	if ctx.Request.Method == "GET" {
+		// GET 请求：从 Query String 读取参数
+		rawSignData = c.parseQueryParams(ctx, &req)
+	} else {
+		// POST 请求：尝试从 JSON Body 或 Form 读取参数
+		contentType := ctx.GetHeader("Content-Type")
+		if contentType == "application/json" || contentType == "application/json; charset=utf-8" {
+			// JSON 格式
+			if err := ctx.ShouldBindJSON(&req); err != nil {
+				response.Fail(ctx, http.StatusBadRequest, "参数错误: "+err.Error())
+				return
+			}
+			// 构建原始签名数据
+			rawSignData = make(map[string]interface{})
+			rawSignData["mchId"] = req.MerchantID
+			rawSignData["channelId"] = req.ChannelID
+			rawSignData["mchOrderNo"] = req.OutOrderNo
+			rawSignData["amount"] = req.Money
+			rawSignData["notifyUrl"] = req.NotifyURL
+			rawSignData["jumpUrl"] = req.JumpURL
+			rawSignData["extra"] = req.Extra
+			rawSignData["compatible"] = req.Compatible
+			rawSignData["test"] = req.Test
+			rawSignData["sign"] = req.Sign
+		} else {
+			// Form 格式（application/x-www-form-urlencoded 或 multipart/form-data）
+			rawSignData = c.parseFormParams(ctx, &req)
+		}
 	}
 
-	// 构建原始签名数据（用于签名验证）
-	// 注意：由于 ShouldBindJSON 会消费 body，我们需要重新读取
-	// 这里简化处理，实际应该从请求中提取所有参数
-	rawSignData := make(map[string]interface{})
-	rawSignData["mchId"] = req.MerchantID
-	rawSignData["channelId"] = req.ChannelID
-	rawSignData["mchOrderNo"] = req.OutOrderNo
-	rawSignData["amount"] = req.Money
-	rawSignData["notifyUrl"] = req.NotifyURL
-	rawSignData["jumpUrl"] = req.JumpURL
-	rawSignData["extra"] = req.Extra
-	rawSignData["compatible"] = req.Compatible
-	rawSignData["test"] = req.Test
-	rawSignData["sign"] = req.Sign
 	req.RawSignData = rawSignData
 
 	// 创建订单
@@ -67,6 +93,138 @@ func (c *OrderController) CreateOrder(ctx *gin.Context) {
 	}
 
 	response.Success(ctx, orderResp)
+}
+
+// parseQueryParams 解析 GET 请求的查询参数
+func (c *OrderController) parseQueryParams(ctx *gin.Context, req *service.CreateOrderRequest) map[string]interface{} {
+	rawSignData := make(map[string]interface{})
+
+	// 从 Query String 读取参数
+	if mchId := ctx.Query("mchId"); mchId != "" {
+		if id, err := strconv.Atoi(mchId); err == nil {
+			req.MerchantID = id
+			rawSignData["mchId"] = id
+		}
+	}
+
+	if channelId := ctx.Query("channelId"); channelId != "" {
+		if id, err := strconv.Atoi(channelId); err == nil {
+			req.ChannelID = id
+			rawSignData["channelId"] = id
+		}
+	}
+
+	if mchOrderNo := ctx.Query("mchOrderNo"); mchOrderNo != "" {
+		req.OutOrderNo = mchOrderNo
+		rawSignData["mchOrderNo"] = mchOrderNo
+	}
+
+	if amount := ctx.Query("amount"); amount != "" {
+		if money, err := strconv.Atoi(amount); err == nil {
+			req.Money = money
+			rawSignData["amount"] = money
+		}
+	}
+
+	if notifyUrl := ctx.Query("notifyUrl"); notifyUrl != "" {
+		req.NotifyURL = notifyUrl
+		rawSignData["notifyUrl"] = notifyUrl
+	}
+
+	if jumpUrl := ctx.Query("jumpUrl"); jumpUrl != "" {
+		req.JumpURL = jumpUrl
+		rawSignData["jumpUrl"] = jumpUrl
+	}
+
+	if extra := ctx.Query("extra"); extra != "" {
+		req.Extra = extra
+		rawSignData["extra"] = extra
+	}
+
+	if compatible := ctx.Query("compatible"); compatible != "" {
+		if comp, err := strconv.Atoi(compatible); err == nil {
+			req.Compatible = comp
+			rawSignData["compatible"] = comp
+		}
+	}
+
+	if test := ctx.Query("test"); test != "" {
+		req.Test = (test == "true" || test == "1")
+		rawSignData["test"] = req.Test
+	}
+
+	if sign := ctx.Query("sign"); sign != "" {
+		req.Sign = sign
+		rawSignData["sign"] = sign
+	}
+
+	return rawSignData
+}
+
+// parseFormParams 解析 POST 请求的 Form 参数
+func (c *OrderController) parseFormParams(ctx *gin.Context, req *service.CreateOrderRequest) map[string]interface{} {
+	rawSignData := make(map[string]interface{})
+
+	// 从 Form 读取参数
+	if mchId := ctx.PostForm("mchId"); mchId != "" {
+		if id, err := strconv.Atoi(mchId); err == nil {
+			req.MerchantID = id
+			rawSignData["mchId"] = id
+		}
+	}
+
+	if channelId := ctx.PostForm("channelId"); channelId != "" {
+		if id, err := strconv.Atoi(channelId); err == nil {
+			req.ChannelID = id
+			rawSignData["channelId"] = id
+		}
+	}
+
+	if mchOrderNo := ctx.PostForm("mchOrderNo"); mchOrderNo != "" {
+		req.OutOrderNo = mchOrderNo
+		rawSignData["mchOrderNo"] = mchOrderNo
+	}
+
+	if amount := ctx.PostForm("amount"); amount != "" {
+		if money, err := strconv.Atoi(amount); err == nil {
+			req.Money = money
+			rawSignData["amount"] = money
+		}
+	}
+
+	if notifyUrl := ctx.PostForm("notifyUrl"); notifyUrl != "" {
+		req.NotifyURL = notifyUrl
+		rawSignData["notifyUrl"] = notifyUrl
+	}
+
+	if jumpUrl := ctx.PostForm("jumpUrl"); jumpUrl != "" {
+		req.JumpURL = jumpUrl
+		rawSignData["jumpUrl"] = jumpUrl
+	}
+
+	if extra := ctx.PostForm("extra"); extra != "" {
+		req.Extra = extra
+		rawSignData["extra"] = extra
+	}
+
+	if compatible := ctx.PostForm("compatible"); compatible != "" {
+		if comp, err := strconv.Atoi(compatible); err == nil {
+			req.Compatible = comp
+			rawSignData["compatible"] = comp
+		}
+	}
+
+	if test := ctx.PostForm("test"); test != "" {
+		req.Test = (test == "true" || test == "1")
+		rawSignData["test"] = req.Test
+	}
+
+	if sign := ctx.PostForm("sign"); sign != "" {
+		req.Sign = sign
+		rawSignData["sign"] = sign
+	}
+
+	return rawSignData
 }
 
 // GetOrder 获取订单信息

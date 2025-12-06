@@ -43,7 +43,8 @@ func SetupRouter() *gin.Engine {
 		orderController := controller.NewOrderController()
 		orders := api.Group("/orders")
 		{
-			orders.POST("", orderController.CreateOrder)       // 创建订单
+			orders.POST("", orderController.CreateOrder)       // 创建订单（POST）
+			orders.GET("", orderController.CreateOrder)        // 创建订单（GET）
 			orders.GET("/:order_no", orderController.GetOrder) // 获取订单
 			orders.GET("/query", orderController.QueryOrder)   // 查询订单
 		}
