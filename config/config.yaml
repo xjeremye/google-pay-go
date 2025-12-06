@@ -13,9 +13,9 @@ app:
 database:
   host: localhost
   port: 3306
-  user: root
-  password: ""
-  dbname: django_vue3_admin
+  user: dvadmin
+  password: "your_strong_password"
+  dbname: django-vue3-admin
   charset: utf8mb4
   max_idle_conns: 10        # 最大空闲连接数（高并发建议: 50）
   max_open_conns: 100       # 最大打开连接数（高并发建议: 500）- 主要瓶颈
