@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/spf13/viper"
@@ -71,16 +72,41 @@ type LogConfig struct {
 }
 
 // Load 加载配置文件
+// 如果 configPath 为空，则根据环境变量 APP_ENV 自动选择配置文件
+// APP_ENV 可选值: dev(默认), test, prod
 func Load(configPath string) error {
+	// 如果未指定配置文件路径，根据环境变量自动选择
+	if configPath == "" {
+		env := os.Getenv("APP_ENV")
+		if env == "" {
+			env = "dev" // 默认使用开发环境
+		}
+		
+		switch env {
+		case "prod", "production":
+			configPath = "config/config.prod.yaml"
+		case "test", "testing":
+			configPath = "config/config.test.yaml"
+		case "dev", "development", "":
+			configPath = "config/config.yaml"
+		default:
+			configPath = fmt.Sprintf("config/config.%s.yaml", env)
+		}
+	}
+
 	viper.SetConfigType("yaml")
 	viper.SetConfigFile(configPath)
 
 	// 设置默认值
 	setDefaults()
 
+	// 支持环境变量覆盖配置
+	viper.SetEnvPrefix("APP")
+	viper.AutomaticEnv()
+
 	// 读取配置文件
 	if err := viper.ReadInConfig(); err != nil {
-		return fmt.Errorf("读取配置文件失败: %w", err)
+		return fmt.Errorf("读取配置文件失败 [%s]: %w", configPath, err)
 	}
 
 	// 解析配置到结构体

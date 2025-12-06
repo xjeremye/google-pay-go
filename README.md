@@ -18,7 +18,10 @@
 ```
 .
 ├── config/                 # 配置文件
-│   ├── config.yaml        # 应用配置
+│   ├── config.yaml        # 开发环境配置
+│   ├── config.prod.yaml   # 生产环境配置（需从模板复制）
+│   ├── config.prod.yaml.example  # 生产环境配置模板
+│   ├── config.test.yaml   # 测试环境配置
 │   └── config.go          # 配置结构定义
 ├── internal/              # 内部代码
 │   ├── controller/        # 控制器层
@@ -75,6 +78,8 @@ go mod download
 
 ### 3. 配置数据库
 
+#### 开发环境
+
 编辑 `config/config.yaml` 文件，配置数据库连接信息：
 
 ```yaml
@@ -86,13 +91,75 @@ database:
   dbname: django_vue3_admin
 ```
 
+#### 生产环境
+
+1. 复制配置模板：
+
+```bash
+cp config/config.prod.yaml.example config/config.prod.yaml
+```
+
+2. 编辑 `config/config.prod.yaml`，配置生产环境参数（数据库、Redis、JWT密钥等）
+
+3. 注意：`config.prod.yaml` 已在 `.gitignore` 中，不会被提交到版本控制
+
+#### 测试环境
+
+测试环境配置文件为 `config/config.test.yaml`，默认使用测试数据库和不同的端口。
+
 ### 4. 运行应用
+
+#### 方式一：使用默认配置（开发环境）
 
 ```bash
 go run main.go
 ```
 
-应用将在 `http://localhost:8080` 启动。
+#### 方式二：通过环境变量指定环境
+
+```bash
+# 开发环境（默认）
+APP_ENV=dev go run main.go
+
+# 测试环境
+APP_ENV=test go run main.go
+
+# 生产环境
+APP_ENV=prod go run main.go
+```
+
+#### 方式三：通过命令行参数指定环境
+
+```bash
+# 开发环境
+go run main.go dev
+
+# 测试环境
+go run main.go test
+
+# 生产环境
+go run main.go prod
+
+# 或指定配置文件路径
+go run main.go config/config.prod.yaml
+```
+
+#### 方式四：编译后运行
+
+```bash
+# 编译
+go build -o bin/golang-pay-core main.go
+
+# 运行（使用环境变量）
+APP_ENV=prod ./bin/golang-pay-core
+
+# 或使用命令行参数
+./bin/golang-pay-core prod
+```
+
+**配置优先级：** 命令行参数 > 环境变量 APP_ENV > 默认（dev）
+
+应用将在配置的端口启动（开发环境默认 8080，测试环境 8081）。
 
 ## API 文档
 
@@ -177,4 +244,3 @@ Authorization: Bearer {token}
 ## 许可证
 
 MIT License
-

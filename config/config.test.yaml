@@ -1,0 +1,47 @@
+# 测试环境配置
+app:
+  name: golang-pay-core
+  version: 1.0.0
+  mode: test
+  port: 8081              # 测试环境使用不同端口
+  read_timeout: 30s
+  write_timeout: 30s
+
+# 数据库配置（测试环境）
+database:
+  host: localhost
+  port: 3306
+  user: root
+  password: ""
+  dbname: django_vue3_admin_test  # 测试环境使用测试数据库
+  charset: utf8mb4
+  max_idle_conns: 10
+  max_open_conns: 50       # 测试环境使用较小连接池
+  conn_max_lifetime: 3600s
+  log_mode: true           # 测试环境开启 SQL 日志便于调试
+
+# Redis 配置（测试环境）
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 1                    # 测试环境使用不同的 Redis DB
+  pool_size: 10
+  min_idle_conns: 5
+
+# JWT 配置
+jwt:
+  secret: test-secret-key  # 测试环境使用测试密钥
+  expire: 3600            # 测试环境使用较短的过期时间
+
+# 日志配置（测试环境）
+log:
+  level: debug             # 测试环境使用 debug 级别便于调试
+  format: text             # 测试环境使用文本格式便于阅读
+  output: stdout           # 测试环境输出到标准输出
+  file_path: logs/test.log
+  max_size: 100
+  max_backups: 7
+  max_age: 7               # 测试环境保留较短时间
+  compress: false          # 测试环境不压缩
+

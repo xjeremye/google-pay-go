@@ -18,7 +18,26 @@ import (
 
 func main() {
 	// 加载配置
-	if err := config.Load("config/config.yaml"); err != nil {
+	// 支持通过环境变量 APP_ENV 或命令行参数指定环境
+	// 环境变量优先级: 命令行参数 > 环境变量 APP_ENV > 默认 dev
+	configPath := ""
+	if len(os.Args) > 1 {
+		// 支持命令行参数: ./app --config=config/config.prod.yaml
+		// 或: ./app prod (自动选择 config.prod.yaml)
+		arg := os.Args[1]
+		if arg == "prod" || arg == "production" {
+			configPath = "config/config.prod.yaml"
+		} else if arg == "test" || arg == "testing" {
+			configPath = "config/config.test.yaml"
+		} else if arg == "dev" || arg == "development" {
+			configPath = "config/config.yaml"
+		} else if len(arg) > 0 && arg[0] != '-' {
+			// 如果参数不是以 - 开头，可能是配置文件路径
+			configPath = arg
+		}
+	}
+	
+	if err := config.Load(configPath); err != nil {
 		panic(fmt.Sprintf("加载配置失败: %v", err))
 	}
 

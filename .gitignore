@@ -30,7 +30,7 @@ logs/
 
 # Config files with sensitive data
 config/config.local.yaml
-config/config.prod.yaml
+config/config.prod.yaml  # 生产环境配置可能包含敏感信息，不提交到版本控制
 
 # OS
 .DS_Store

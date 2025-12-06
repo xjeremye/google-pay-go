@@ -1,8 +1,8 @@
-# 应用配置
+# 开发环境配置
 app:
   name: golang-pay-core
   version: 1.0.0
-  mode: release # debug, release, test
+  mode: debug              # 开发环境使用 debug 模式
   port: 8080
   read_timeout: 30s
   write_timeout: 30s
