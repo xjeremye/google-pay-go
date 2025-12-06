@@ -1,0 +1,58 @@
+# 应用配置
+app:
+  name: golang-pay-core
+  version: 1.0.0
+  mode: release # debug, release, test
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+
+# 数据库配置
+database:
+  host: localhost
+  port: 3306
+  user: root
+  password: ""
+  dbname: django_vue3_admin
+  charset: utf8mb4
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: 3600s
+  log_mode: true # 是否开启 SQL 日志
+
+# Redis 配置
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  pool_size: 10
+  min_idle_conns: 5
+
+# JWT 配置
+jwt:
+  secret: your-secret-key-change-in-production
+  expire: 7200 # 过期时间（秒）
+
+# 日志配置
+log:
+  level: info # debug, info, warn, error
+  format: json # json, text
+  output: stdout # stdout, file
+  file_path: logs/app.log
+  max_size: 100 # MB
+  max_backups: 7
+  max_age: 30 # days
+  compress: true
+
+# 支付系统配置
+payment:
+  # 订单号生成前缀
+  order_prefix: "PAY"
+  # 订单超时时间（秒）
+  order_timeout: 300
+  # 通知重试次数
+  notify_retry_times: 3
+  # 通知重试间隔（秒）
+  notify_retry_interval: 60
+
