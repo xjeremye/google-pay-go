@@ -16,7 +16,6 @@ type Config struct {
 	Redis   RedisConfig   `mapstructure:"redis"`
 	JWT     JWTConfig     `mapstructure:"jwt"`
 	Log     LogConfig     `mapstructure:"log"`
-	Payment PaymentConfig `mapstructure:"payment"`
 }
 
 // AppConfig 应用配置
@@ -69,14 +68,6 @@ type LogConfig struct {
 	MaxBackups int    `mapstructure:"max_backups"`
 	MaxAge     int    `mapstructure:"max_age"`
 	Compress   bool   `mapstructure:"compress"`
-}
-
-// PaymentConfig 支付系统配置
-type PaymentConfig struct {
-	OrderPrefix        string `mapstructure:"order_prefix"`
-	OrderTimeout       int    `mapstructure:"order_timeout"`
-	NotifyRetryTimes   int    `mapstructure:"notify_retry_times"`
-	NotifyRetryInterval int   `mapstructure:"notify_retry_interval"`
 }
 
 // Load 加载配置文件

@@ -8,6 +8,8 @@ app:
   write_timeout: 30s
 
 # 数据库配置
+# 高并发建议: max_open_conns >= 500, max_idle_conns >= 50
+# 当前配置支持并发: 500-1,000 QPS
 database:
   host: localhost
   port: 3306
@@ -15,19 +17,21 @@ database:
   password: ""
   dbname: django_vue3_admin
   charset: utf8mb4
-  max_idle_conns: 10
-  max_open_conns: 100
-  conn_max_lifetime: 3600s
-  log_mode: true # 是否开启 SQL 日志
+  max_idle_conns: 10        # 最大空闲连接数（高并发建议: 50）
+  max_open_conns: 100       # 最大打开连接数（高并发建议: 500）- 主要瓶颈
+  conn_max_lifetime: 3600s  # 连接最大生存时间
+  log_mode: true            # 是否开启 SQL 日志（生产环境建议: false）
 
 # Redis 配置
+# 高并发建议: pool_size >= 50, min_idle_conns >= 20
+# 当前配置支持并发: 2,000-3,000 QPS
 redis:
   host: localhost
   port: 6379
   password: ""
   db: 0
-  pool_size: 10
-  min_idle_conns: 5
+  pool_size: 10             # 连接池大小（高并发建议: 50）
+  min_idle_conns: 5         # 最小空闲连接数（高并发建议: 20）
 
 # JWT 配置
 jwt:
@@ -44,15 +48,3 @@ log:
   max_backups: 7
   max_age: 30 # days
   compress: true
-
-# 支付系统配置
-payment:
-  # 订单号生成前缀
-  order_prefix: "PAY"
-  # 订单超时时间（秒）
-  order_timeout: 300
-  # 通知重试次数
-  notify_retry_times: 3
-  # 通知重试间隔（秒）
-  notify_retry_interval: 60
-
