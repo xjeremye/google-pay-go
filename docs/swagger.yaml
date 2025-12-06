@@ -1,0 +1,186 @@
+basePath: /api/v1
+definitions:
+  controller.CreateOrderRequest:
+    properties:
+      extra:
+        example: '{}'
+        type: string
+      jump_url:
+        example: https://example.com/jump
+        type: string
+      merchant_tax:
+        example: 50
+        type: integer
+      money:
+        example: 10000
+        minimum: 1
+        type: integer
+      notify_money:
+        example: 10000
+        type: integer
+      notify_url:
+        example: https://example.com/notify
+        type: string
+      out_order_no:
+        example: ORD20240101001
+        type: string
+      pay_channel_id:
+        example: 1
+        type: integer
+      product_id:
+        example: PROD001
+        type: string
+      product_name:
+        example: 支付宝扫码
+        type: string
+      req_extra:
+        example: '{}'
+        type: string
+      tax:
+        example: 100
+        type: integer
+    required:
+    - money
+    - notify_money
+    - notify_url
+    - out_order_no
+    type: object
+  response.Response:
+    properties:
+      code:
+        type: integer
+      data: {}
+      message:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@example.com
+    name: API Support
+    url: https://example.com/support
+  description: 基于 Golang 开发的高并发支付系统核心 API
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: https://example.com/terms/
+  title: 支付系统核心 API
+  version: "1.0"
+paths:
+  /api/v1/orders:
+    post:
+      consumes:
+      - application/json
+      description: 创建支付订单
+      parameters:
+      - description: 订单信息
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/controller.CreateOrderRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: object
+              type: object
+        "400":
+          description: 参数错误
+          schema:
+            $ref: '#/definitions/response.Response'
+        "500":
+          description: 服务器错误
+          schema:
+            $ref: '#/definitions/response.Response'
+      summary: 创建订单
+      tags:
+      - 订单
+  /api/v1/orders/{order_no}:
+    get:
+      description: 根据订单号获取订单详情
+      parameters:
+      - description: 订单号
+        in: path
+        name: order_no
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: object
+              type: object
+        "400":
+          description: 参数错误
+          schema:
+            $ref: '#/definitions/response.Response'
+        "404":
+          description: 订单不存在
+          schema:
+            $ref: '#/definitions/response.Response'
+      summary: 获取订单信息
+      tags:
+      - 订单
+  /api/v1/orders/query:
+    get:
+      description: 根据商户订单号查询订单
+      parameters:
+      - description: 商户订单号
+        in: query
+        name: out_order_no
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: object
+              type: object
+        "400":
+          description: 参数错误
+          schema:
+            $ref: '#/definitions/response.Response'
+        "404":
+          description: 订单不存在
+          schema:
+            $ref: '#/definitions/response.Response'
+      summary: 查询订单
+      tags:
+      - 订单
+  /health:
+    get:
+      description: 检查服务健康状态，包括数据库和 Redis 连接状态
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 健康检查
+      tags:
+      - 系统
+schemes:
+- http
+- https
+swagger: "2.0"

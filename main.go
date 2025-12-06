@@ -1,3 +1,19 @@
+// @title           支付系统核心 API
+// @version         1.0
+// @description     基于 Golang 开发的高并发支付系统核心 API
+// @termsOfService  https://example.com/terms/
+
+// @contact.name   API Support
+// @contact.url    https://example.com/support
+// @contact.email  support@example.com
+
+// @license.name  MIT
+// @license.url   https://opensource.org/licenses/MIT
+
+// @host      localhost:8080
+// @BasePath  /api/v1
+
+// @schemes   http https
 package main
 
 import (
@@ -14,6 +30,8 @@ import (
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/router"
 	"go.uber.org/zap"
+
+	_ "github.com/golang-pay-core/docs" // Swagger 文档
 )
 
 func main() {

@@ -32,7 +32,10 @@ logs/
 config/config.local.yaml
 config/config.prod.yaml  # 生产环境配置可能包含敏感信息，不提交到版本控制
 
+# Swagger generated files (optional, if you want to commit them, remove these lines)
+# docs/swagger.json
+# docs/swagger.yaml
+
 # OS
 .DS_Store
 Thumbs.db
-

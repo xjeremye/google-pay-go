@@ -31,7 +31,9 @@ func NewOrderController() *OrderController {
 // @Accept json
 // @Produce json
 // @Param request body CreateOrderRequest true "订单信息"
-// @Success 200 {object} response.Response
+// @Success 200 {object} response.Response{data=object} "成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Failure 500 {object} response.Response "服务器错误"
 // @Router /api/v1/orders [post]
 func (c *OrderController) CreateOrder(ctx *gin.Context) {
 	var req service.CreateOrderRequest
@@ -79,8 +81,10 @@ func (c *OrderController) CreateOrder(ctx *gin.Context) {
 // @Description 根据订单号获取订单详情
 // @Tags 订单
 // @Produce json
-// @Param order_no path string true "订单号"
-// @Success 200 {object} response.Response
+// @Param order_no path string true "订单号" example:"PAY20240101120000001"
+// @Success 200 {object} response.Response{data=object} "成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Failure 404 {object} response.Response "订单不存在"
 // @Router /api/v1/orders/{order_no} [get]
 func (c *OrderController) GetOrder(ctx *gin.Context) {
 	orderNo := ctx.Param("order_no")
@@ -103,8 +107,10 @@ func (c *OrderController) GetOrder(ctx *gin.Context) {
 // @Description 根据商户订单号查询订单
 // @Tags 订单
 // @Produce json
-// @Param out_order_no query string true "商户订单号"
-// @Success 200 {object} response.Response
+// @Param out_order_no query string true "商户订单号" example:"ORD20240101001"
+// @Success 200 {object} response.Response{data=object} "成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Failure 404 {object} response.Response "订单不存在"
 // @Router /api/v1/orders/query [get]
 func (c *OrderController) QueryOrder(ctx *gin.Context) {
 	outOrderNo := ctx.Query("out_order_no")

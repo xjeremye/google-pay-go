@@ -4,7 +4,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-pay-core/config"
 	"github.com/golang-pay-core/internal/controller"
+	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/middleware"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 )
 
 // SetupRouter 设置路由
@@ -18,15 +21,16 @@ func SetupRouter() *gin.Engine {
 	r.Use(middleware.Logger())
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS())
+	r.Use(middleware.Metrics()) // Prometheus 监控中间件
 
-	// 健康检查
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"status":  "ok",
-			"service": config.Cfg.App.Name,
-			"version": config.Cfg.App.Version,
-		})
-	})
+	// Swagger 文档
+	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	// Prometheus 指标端点
+	r.GET("/metrics", middleware.PrometheusHandler())
+
+	// 健康检查（增强版）
+	r.GET("/health", healthCheck)
 
 	// API 路由组
 	api := r.Group("/api/v1")
@@ -42,5 +46,66 @@ func SetupRouter() *gin.Engine {
 	}
 
 	return r
+}
+
+// healthCheck 健康检查端点
+// @Summary 健康检查
+// @Description 检查服务健康状态，包括数据库和 Redis 连接状态
+// @Tags 系统
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router /health [get]
+func healthCheck(c *gin.Context) {
+	health := gin.H{
+		"status":  "ok",
+		"service": config.Cfg.App.Name,
+		"version": config.Cfg.App.Version,
+		"mode":    config.Cfg.App.Mode,
+	}
+
+	// 检查数据库连接
+	if database.DB != nil {
+		sqlDB, err := database.DB.DB()
+		if err == nil {
+			if err := sqlDB.Ping(); err == nil {
+				stats := sqlDB.Stats()
+				health["database"] = gin.H{
+					"status":           "ok",
+					"open_connections": stats.OpenConnections,
+					"in_use":           stats.InUse,
+					"idle":             stats.Idle,
+					"wait_count":       stats.WaitCount,
+				}
+			} else {
+				health["database"] = gin.H{
+					"status": "error",
+					"error":  err.Error(),
+				}
+			}
+		}
+	}
+
+	// 检查 Redis 连接
+	if database.RDB != nil {
+		ctx := database.GetContext()
+		if err := database.RDB.Ping(ctx).Err(); err == nil {
+			poolStats := database.RDB.PoolStats()
+			health["redis"] = gin.H{
+				"status":      "ok",
+				"hits":        poolStats.Hits,
+				"misses":      poolStats.Misses,
+				"timeouts":    poolStats.Timeouts,
+				"total_conns": poolStats.TotalConns,
+				"idle_conns":  poolStats.IdleConns,
+			}
+		} else {
+			health["redis"] = gin.H{
+				"status": "error",
+				"error":  err.Error(),
+			}
+		}
+	}
+
+	c.JSON(200, health)
 }
 

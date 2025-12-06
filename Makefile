@@ -44,4 +44,13 @@ lint:
 install-tools:
 	@echo "安装开发工具..."
 	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	@go install github.com/swaggo/swag/cmd/swag@latest
+
+# 生成 Swagger 文档
+swagger:
+	@echo "生成 Swagger 文档..."
+	@go run github.com/swaggo/swag/cmd/swag@latest init -g main.go -o docs --parseDependency --parseInternal
+
+# 生成 Swagger 文档并运行
+swagger-run: swagger run
 

@@ -10,6 +10,8 @@
 - ✅ **缓存支持**: 集成 Redis，提升性能
 - ✅ **日志系统**: 使用 Zap 高性能日志库
 - ✅ **配置管理**: 使用 Viper 管理配置，支持多环境
+- ✅ **API 文档**: 集成 Swagger，自动生成 API 文档
+- ✅ **监控系统**: 集成 Prometheus，支持指标监控
 - ✅ **优雅关闭**: 支持优雅关闭服务器
 
 ## 项目结构
@@ -160,15 +162,73 @@ APP_ENV=prod ./bin/golang-pay-core
 
 应用将在配置的端口启动（开发环境默认 8080，测试环境 8081）。
 
-## API 文档
+## API 文档和监控
+
+### Swagger API 文档
+
+启动应用后，访问以下地址查看 API 文档：
+
+```
+http://localhost:8080/swagger/index.html
+```
+
+生成 Swagger 文档：
+
+```bash
+# 使用 Makefile
+make swagger
+
+# 或直接使用 swag 命令
+swag init -g main.go -o docs --parseDependency --parseInternal
+```
+
+### Prometheus 监控
+
+访问监控指标：
+
+```
+http://localhost:8080/metrics
+```
+
+监控指标包括：
+- HTTP 请求总数和持续时间
+- 请求/响应大小
+- 当前并发请求数
+- 数据库和 Redis 连接状态
 
 ### 健康检查
 
-```http
-GET /health
+访问健康检查端点：
+
+```
+http://localhost:8080/health
 ```
 
-### 创建订单
+响应示例：
+```json
+{
+  "status": "ok",
+  "service": "golang-pay-core",
+  "version": "1.0.0",
+  "database": {
+    "status": "ok",
+    "open_connections": 5,
+    "in_use": 2,
+    "idle": 3
+  },
+  "redis": {
+    "status": "ok",
+    "total_conns": 10,
+    "idle_conns": 5
+  }
+}
+```
+
+详细说明请查看 [监控和 Swagger 文档使用指南](./docs/monitoring.md)
+
+### API 示例
+
+#### 创建订单
 
 ```http
 POST /api/v1/orders
