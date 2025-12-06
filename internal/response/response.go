@@ -40,3 +40,12 @@ func FailWithData(c *gin.Context, code int, message string, data interface{}) {
 	})
 }
 
+// FailWithCode 失败响应（使用业务错误码）
+func FailWithCode(c *gin.Context, code int, message string) {
+	c.JSON(http.StatusOK, Response{
+		Code:    code,
+		Message: message,
+		Data:    nil,
+	})
+}
+

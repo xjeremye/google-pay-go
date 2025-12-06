@@ -10,6 +10,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/models"
+	"github.com/golang-pay-core/internal/plugin"
 	"github.com/golang-pay-core/internal/utils"
 	"gorm.io/gorm"
 )
@@ -69,10 +70,12 @@ type OrderCreateContext struct {
 	SignKey        string
 
 	// 关联对象
-	Merchant *models.Merchant
-	Tenant   *models.Tenant
-	Channel  *models.PayChannel
-	User     *SystemUser
+	Merchant   *models.Merchant
+	Tenant     *models.Tenant
+	Channel    *models.PayChannel
+	Plugin     *models.PayPlugin
+	PayType    *models.PayType
+	User       *SystemUser
 	TenantUser *SystemUser
 
 	// 订单信息
@@ -80,18 +83,81 @@ type OrderCreateContext struct {
 	OrderID string
 }
 
+// 实现 plugin.OrderContext 接口
+func (o *OrderCreateContext) GetOutOrderNo() string              { return o.OutOrderNo }
+func (o *OrderCreateContext) GetNotifyURL() string                { return o.NotifyURL }
+func (o *OrderCreateContext) GetMoney() int                       { return o.Money }
+func (o *OrderCreateContext) GetJumpURL() string                  { return o.JumpURL }
+func (o *OrderCreateContext) GetNotifyMoney() int                 { return o.NotifyMoney }
+func (o *OrderCreateContext) GetExtra() string                    { return o.Extra }
+func (o *OrderCreateContext) GetCompatible() int                  { return o.Compatible }
+func (o *OrderCreateContext) GetTest() bool                       { return o.Test }
+func (o *OrderCreateContext) GetMerchantID() int64                 { return o.MerchantID }
+func (o *OrderCreateContext) GetTenantID() int64                   { return o.TenantID }
+func (o *OrderCreateContext) GetChannelID() int64                 { return o.ChannelID }
+func (o *OrderCreateContext) GetPluginID() int64                  { return o.PluginID }
+func (o *OrderCreateContext) GetPluginType() string               { return o.PluginType }
+func (o *OrderCreateContext) GetPluginUpstream() int              { return o.PluginUpstream }
+func (o *OrderCreateContext) GetDomainID() *int64                 { return o.DomainID }
+func (o *OrderCreateContext) GetDomainURL() string               { return o.DomainURL }
+func (o *OrderCreateContext) GetOrderNo() string                  { return o.OrderNo }
+func (o *OrderCreateContext) SetOrderNo(no string)                { o.OrderNo = no }
+func (o *OrderCreateContext) SetDomainID(id int64)                { o.DomainID = &id }
+func (o *OrderCreateContext) SetDomainURL(url string)             { o.DomainURL = url }
+
 // OrderService 订单服务（重构版）
 type OrderService struct {
-	cacheService *CacheService
-	redis        *redis.Client
+	cacheService  *CacheService
+	pluginService *PluginService
+	pluginManager *plugin.Manager
+	redis         *redis.Client
 }
 
 // NewOrderService 创建订单服务
 func NewOrderService() *OrderService {
+	pluginMgr := plugin.NewManager(database.RDB)
+	pluginSvc := NewPluginService()
+	
+	// 设置插件信息提供者（实现 PluginInfoProvider 接口）
+	pluginMgr.SetInfoProvider(&pluginInfoProviderAdapter{service: pluginSvc})
+	
 	return &OrderService{
-		cacheService: NewCacheService(),
-		redis:        database.RDB,
+		cacheService:  NewCacheService(),
+		pluginService: pluginSvc,
+		pluginManager: pluginMgr,
+		redis:         database.RDB,
 	}
+}
+
+// pluginInfoProviderAdapter 适配器，将 PluginService 适配为 PluginInfoProvider
+type pluginInfoProviderAdapter struct {
+	service *PluginService
+}
+
+func (a *pluginInfoProviderAdapter) GetPlugin(ctx context.Context, pluginID int64) (interface{}, error) {
+	return a.service.GetPlugin(ctx, pluginID)
+}
+
+func (a *pluginInfoProviderAdapter) GetPluginUpstream(ctx context.Context, pluginID int64) (int, error) {
+	return a.service.GetPluginUpstream(ctx, pluginID)
+}
+
+func (a *pluginInfoProviderAdapter) GetPluginPayTypes(ctx context.Context, pluginID int64) ([]interface{}, error) {
+	payTypes, err := a.service.GetPluginPayTypes(ctx, pluginID)
+	if err != nil {
+		return nil, err
+	}
+	
+	result := make([]interface{}, len(payTypes))
+	for i, pt := range payTypes {
+		result[i] = map[string]interface{}{
+			"id":     pt.ID,
+			"name":   pt.Name,
+			"key":    pt.Key,
+			"status": pt.Status,
+		}
+	}
+	return result, nil
 }
 
 // CreateOrder 创建订单（主入口）
@@ -131,6 +197,9 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 	if err := s.validateChannel(ctx, orderCtx, int64(req.ChannelID)); err != nil {
 		return nil, err
 	}
+	if err := s.validatePlugin(ctx, orderCtx); err != nil {
+		return nil, err
+	}
 
 	// 4. 创建订单和详情
 	if err := s.createOrderAndDetail(ctx, orderCtx); err != nil {
@@ -140,8 +209,11 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 	// 5. 检查余额（简化版，实际需要查询租户余额表）
 	// TODO: 实现余额检查
 
-	// 6. 生成支付URL（简化版，实际需要调用插件）
-	payURL := s.generatePayURL(ctx, orderCtx)
+	// 6. 生成支付URL（使用插件系统）
+	payURL, err := s.generatePayURL(ctx, orderCtx)
+	if err != nil {
+		return nil, err
+	}
 
 	// 7. 设置缓存
 	s.setCache(ctx, orderCtx)
@@ -270,8 +342,54 @@ func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreat
 	orderCtx.ChannelID = channelID
 	orderCtx.PluginID = channel.PluginID
 
-	// TODO: 获取插件信息和支付类型
-	// 这里简化处理，实际需要查询插件表和支付类型表
+	return nil
+}
+
+// validatePlugin 验证插件
+func (s *OrderService) validatePlugin(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	if orderCtx.PluginID == 0 {
+		return ErrPluginUnavailable
+	}
+
+	// 获取插件信息
+	pluginInfo, err := s.pluginService.GetPlugin(ctx, orderCtx.PluginID)
+	if err != nil {
+		return ErrPluginUnavailable
+	}
+
+	if !pluginInfo.Status {
+		return ErrPluginUnavailable
+	}
+
+	orderCtx.Plugin = pluginInfo
+
+	// 获取插件上游类型
+	upstream, err := s.pluginService.GetPluginUpstream(ctx, orderCtx.PluginID)
+	if err != nil {
+		return ErrPluginUnavailable
+	}
+	orderCtx.PluginUpstream = upstream
+
+	// 获取支付类型（关键：获取 PayType 的 key，如 alipay_wap）
+	payTypes, err := s.pluginService.GetPluginPayTypes(ctx, orderCtx.PluginID)
+	if err != nil || len(payTypes) == 0 {
+		return NewOrderError(ErrCodePayTypeUnavailable, "该通道不可用")
+	}
+
+	// 使用第一个支付类型
+	payType := payTypes[0]
+	if !payType.Status {
+		return NewOrderError(ErrCodePayTypeUnavailable, "该通道不可用")
+	}
+
+	orderCtx.PayType = &payType
+	// 关键：使用 PayType 的 Key 作为 PluginType（如 alipay_wap）
+	// 插件管理器将使用这个 key 来创建对应的插件实例
+	orderCtx.PluginType = payType.Key
+
+	if orderCtx.PluginType == "" {
+		return NewOrderError(ErrCodePayTypeUnavailable, "支付类型标识不能为空")
+	}
 
 	return nil
 }
@@ -416,11 +534,77 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 	return nil
 }
 
-// generatePayURL 生成支付URL（简化版）
-func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreateContext) string {
-	// TODO: 实际需要调用插件系统生成支付URL
-	// 这里返回一个占位符
-	return fmt.Sprintf("https://pay.example.com/pay?order_no=%s", orderCtx.OrderNo)
+// generatePayURL 生成支付URL（使用插件系统）
+func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreateContext) (string, *OrderError) {
+	// 获取插件实例
+	pluginInstance, err := s.pluginManager.GetPluginByCtx(ctx, orderCtx)
+	if err != nil {
+		return "", NewOrderError(ErrCodePluginUnavailable, fmt.Sprintf("插件不可用: %v", err))
+	}
+
+	// 构建插件请求
+	createReq := &plugin.CreateOrderRequest{
+		OutOrderNo:     orderCtx.OutOrderNo,
+		OrderNo:        orderCtx.OrderNo,
+		Money:          orderCtx.Money,
+		NotifyURL:      orderCtx.NotifyURL,
+		JumpURL:        orderCtx.JumpURL,
+		Extra:          orderCtx.Extra,
+		MerchantID:     orderCtx.MerchantID,
+		TenantID:       orderCtx.TenantID,
+		ChannelID:      orderCtx.ChannelID,
+		PluginID:       orderCtx.PluginID,
+		PluginType:     orderCtx.PluginType,
+		PluginUpstream: orderCtx.PluginUpstream,
+		DomainID:       orderCtx.DomainID,
+		DomainURL:      orderCtx.DomainURL,
+		Compatible:     orderCtx.Compatible,
+		Test:           orderCtx.Test,
+	}
+
+	// 添加关联对象（转换为 map）
+	if orderCtx.Channel != nil {
+		channelMap := map[string]interface{}{
+			"id":        orderCtx.Channel.ID,
+			"name":      orderCtx.Channel.Name,
+			"status":    orderCtx.Channel.Status,
+			"plugin_id": orderCtx.Channel.PluginID,
+		}
+		createReq.Channel = channelMap
+	}
+
+	if orderCtx.Plugin != nil {
+		pluginMap := map[string]interface{}{
+			"id":          orderCtx.Plugin.ID,
+			"name":        orderCtx.Plugin.Name,
+			"status":      orderCtx.Plugin.Status,
+			"description": orderCtx.Plugin.Description,
+		}
+		createReq.Plugin = pluginMap
+	}
+
+	if orderCtx.PayType != nil {
+		payTypeMap := map[string]interface{}{
+			"id":     orderCtx.PayType.ID,
+			"name":   orderCtx.PayType.Name,
+			"key":    orderCtx.PayType.Key,
+			"status": orderCtx.PayType.Status,
+		}
+		createReq.PayType = payTypeMap
+	}
+
+	// 调用插件创建订单
+	createResp, err := pluginInstance.CreateOrder(ctx, createReq)
+	if err != nil {
+		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单失败: %v", err))
+	}
+
+	// 检查响应
+	if !createResp.IsSuccess() {
+		return "", NewOrderError(createResp.ErrorCode, createResp.ErrorMessage)
+	}
+
+	return createResp.PayURL, nil
 }
 
 // setCache 设置缓存

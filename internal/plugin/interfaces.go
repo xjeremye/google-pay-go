@@ -1,0 +1,104 @@
+package plugin
+
+import (
+	"context"
+)
+
+// OrderContext 订单上下文接口，插件需要从上下文中获取信息
+type OrderContext interface {
+	GetOutOrderNo() string
+	GetNotifyURL() string
+	GetMoney() int
+	GetJumpURL() string
+	GetNotifyMoney() int
+	GetExtra() string
+	GetCompatible() int
+	GetTest() bool
+	GetMerchantID() int64
+	GetTenantID() int64
+	GetChannelID() int64
+	GetPluginID() int64
+	GetPluginType() string
+	GetPluginUpstream() int
+	GetDomainID() *int64
+	GetDomainURL() string
+	GetOrderNo() string
+	SetOrderNo(no string)
+	SetDomainID(id int64)
+	SetDomainURL(url string)
+}
+
+// Plugin 插件核心接口
+type Plugin interface {
+	// CreateOrder 创建订单，返回支付URL
+	CreateOrder(ctx context.Context, req *CreateOrderRequest) (*CreateOrderResponse, error)
+}
+
+// PluginCapabilities 插件能力接口（可选实现）
+type PluginCapabilities interface {
+	// CanHandleExtra 是否可以处理额外参数
+	CanHandleExtra() bool
+	// AutoExtra 是否自动处理额外参数
+	AutoExtra() bool
+	// ExtraNeedProduct 额外参数是否需要产品
+	ExtraNeedProduct() bool
+	// ExtraNeedCookie 额外参数是否需要Cookie
+	ExtraNeedCookie() bool
+	// GetTimeout 获取订单超时时间（秒）
+	GetTimeout(ctx context.Context, pluginID int64) int
+}
+
+// CreateOrderRequest 创建订单请求
+type CreateOrderRequest struct {
+	OutOrderNo     string                 `json:"out_order_no"`
+	OrderNo        string                 `json:"order_no"`
+	Money          int                    `json:"money"`
+	NotifyURL      string                 `json:"notify_url"`
+	JumpURL        string                 `json:"jump_url"`
+	Extra          string                 `json:"extra"`
+	MerchantID     int64                  `json:"merchant_id"`
+	TenantID       int64                  `json:"tenant_id"`
+	ChannelID      int64                  `json:"channel_id"`
+	PluginID       int64                  `json:"plugin_id"`
+	PluginType     string                 `json:"plugin_type"`
+	PluginUpstream int                    `json:"plugin_upstream"`
+	DomainID       *int64                 `json:"domain_id"`
+	DomainURL      string                 `json:"domain_url"`
+	Domain         map[string]interface{} `json:"domain,omitempty"`
+	Channel        map[string]interface{} `json:"channel,omitempty"`
+	Plugin         map[string]interface{} `json:"plugin,omitempty"`
+	PayType        map[string]interface{} `json:"pay_type,omitempty"`
+	Compatible     int                    `json:"compatible"`
+	Test           bool                   `json:"test"`
+}
+
+// CreateOrderResponse 创建订单响应
+type CreateOrderResponse struct {
+	Success      bool                   `json:"success"`
+	PayURL       string                 `json:"pay_url,omitempty"`
+	ErrorCode    int                    `json:"error_code,omitempty"`
+	ErrorMessage string                 `json:"error_message,omitempty"`
+	ExtraData    map[string]interface{} `json:"extra_data,omitempty"`
+}
+
+// IsSuccess 检查响应是否成功
+func (r *CreateOrderResponse) IsSuccess() bool {
+	return r.Success
+}
+
+// NewSuccessResponse 创建成功响应
+func NewSuccessResponse(payURL string) *CreateOrderResponse {
+	return &CreateOrderResponse{
+		Success: true,
+		PayURL:  payURL,
+	}
+}
+
+// NewErrorResponse 创建错误响应
+func NewErrorResponse(code int, message string) *CreateOrderResponse {
+	return &CreateOrderResponse{
+		Success:      false,
+		ErrorCode:    code,
+		ErrorMessage: message,
+	}
+}

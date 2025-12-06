@@ -10,8 +10,8 @@ import (
 )
 
 type OrderController struct {
-	orderService   *service.OrderService
-	merchantService *service.MerchantService
+	orderService      *service.OrderService
+	merchantService   *service.MerchantService
 	payChannelService *service.PayChannelService
 }
 
@@ -19,7 +19,7 @@ type OrderController struct {
 func NewOrderController() *OrderController {
 	return &OrderController{
 		orderService:      service.NewOrderService(),
-		merchantService:    service.NewMerchantService(),
+		merchantService:   service.NewMerchantService(),
 		payChannelService: service.NewPayChannelService(),
 	}
 }
@@ -42,38 +42,31 @@ func (c *OrderController) CreateOrder(ctx *gin.Context) {
 		return
 	}
 
-	// 获取商户ID（从中间件中获取）
-	merchantID, exists := ctx.Get("merchant_id")
-	if exists {
-		if id, ok := merchantID.(int64); ok {
-			req.MerchantID = &id
-		}
-	}
-
-	// 验证商户
-	if req.MerchantID != nil {
-		if err := c.merchantService.ValidateMerchant(*req.MerchantID); err != nil {
-			response.Fail(ctx, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-
-	// 验证支付通道
-	if req.PayChannelID != nil {
-		if err := c.payChannelService.ValidatePayChannel(*req.PayChannelID, req.Money); err != nil {
-			response.Fail(ctx, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
+	// 构建原始签名数据（用于签名验证）
+	// 注意：由于 ShouldBindJSON 会消费 body，我们需要重新读取
+	// 这里简化处理，实际应该从请求中提取所有参数
+	rawSignData := make(map[string]interface{})
+	rawSignData["mchId"] = req.MerchantID
+	rawSignData["channelId"] = req.ChannelID
+	rawSignData["mchOrderNo"] = req.OutOrderNo
+	rawSignData["amount"] = req.Money
+	rawSignData["notifyUrl"] = req.NotifyURL
+	rawSignData["jumpUrl"] = req.JumpURL
+	rawSignData["extra"] = req.Extra
+	rawSignData["compatible"] = req.Compatible
+	rawSignData["test"] = req.Test
+	rawSignData["sign"] = req.Sign
+	req.RawSignData = rawSignData
 
 	// 创建订单
-	order, err := c.orderService.CreateOrder(&req)
-	if err != nil {
-		response.Fail(ctx, http.StatusInternalServerError, err.Error())
+	orderResp, orderErr := c.orderService.CreateOrder(ctx.Request.Context(), &req)
+	if orderErr != nil {
+		// 返回业务错误码和消息
+		response.FailWithCode(ctx, orderErr.Code, orderErr.Message)
 		return
 	}
 
-	response.Success(ctx, order)
+	response.Success(ctx, orderResp)
 }
 
 // GetOrder 获取订单信息
@@ -165,4 +158,3 @@ type CreateOrderRequest struct {
 	Extra        string `json:"extra" example:"{}"`
 	PayChannelID *int64 `json:"pay_channel_id" example:"1"`
 }
-
