@@ -39,13 +39,6 @@ func SetupRouter() *gin.Engine {
 			orders.GET("/:order_no", orderController.GetOrder)     // 获取订单
 			orders.GET("/query", orderController.QueryOrder)       // 查询订单
 		}
-
-		// 需要认证的路由
-		auth := api.Group("")
-		auth.Use(middleware.Auth())
-		{
-			// 这里可以添加需要认证的路由
-		}
 	}
 
 	return r

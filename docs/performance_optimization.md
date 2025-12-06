@@ -38,11 +38,6 @@ redis:
   pool_size: 50             # 增加到 50
   min_idle_conns: 20        # 增加到 20
 
-# JWT 配置
-jwt:
-  secret: your-secret-key-change-in-production
-  expire: 7200
-
 # 日志配置
 log:
   level: info

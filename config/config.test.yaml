@@ -29,11 +29,6 @@ redis:
   pool_size: 10
   min_idle_conns: 5
 
-# JWT 配置
-jwt:
-  secret: test-secret-key  # 测试环境使用测试密钥
-  expire: 3600            # 测试环境使用较短的过期时间
-
 # 日志配置（测试环境）
 log:
   level: debug             # 测试环境使用 debug 级别便于调试

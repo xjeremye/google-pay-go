@@ -9,8 +9,7 @@
 - ✅ **数据库支持**: 集成 GORM，支持 MySQL 数据库
 - ✅ **缓存支持**: 集成 Redis，提升性能
 - ✅ **日志系统**: 使用 Zap 高性能日志库
-- ✅ **配置管理**: 使用 Viper 管理配置
-- ✅ **JWT 认证**: 支持 JWT Token 认证
+- ✅ **配置管理**: 使用 Viper 管理配置，支持多环境
 - ✅ **优雅关闭**: 支持优雅关闭服务器
 
 ## 项目结构
@@ -99,7 +98,7 @@ database:
 cp config/config.prod.yaml.example config/config.prod.yaml
 ```
 
-2. 编辑 `config/config.prod.yaml`，配置生产环境参数（数据库、Redis、JWT密钥等）
+2. 编辑 `config/config.prod.yaml`，配置生产环境参数（数据库、Redis 等）
 
 3. 注意：`config.prod.yaml` 已在 `.gitignore` 中，不会被提交到版本控制
 

@@ -29,11 +29,6 @@ redis:
   pool_size: 50             # 生产环境建议值
   min_idle_conns: 20        # 生产环境建议值
 
-# JWT 配置
-jwt:
-  secret: your-secret-key-change-in-production  # 生产环境必须修改为强密钥
-  expire: 7200 # 过期时间（秒）
-
 # 日志配置（生产环境）
 log:
   level: info               # 生产环境使用 info 级别

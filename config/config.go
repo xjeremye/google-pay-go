@@ -15,7 +15,6 @@ type Config struct {
 	App     AppConfig     `mapstructure:"app"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Redis   RedisConfig   `mapstructure:"redis"`
-	JWT     JWTConfig     `mapstructure:"jwt"`
 	Log     LogConfig     `mapstructure:"log"`
 }
 
@@ -51,12 +50,6 @@ type RedisConfig struct {
 	DB           int    `mapstructure:"db"`
 	PoolSize     int    `mapstructure:"pool_size"`
 	MinIdleConns int    `mapstructure:"min_idle_conns"`
-}
-
-// JWTConfig JWT 配置
-type JWTConfig struct {
-	Secret string `mapstructure:"secret"`
-	Expire int    `mapstructure:"expire"`
 }
 
 // LogConfig 日志配置
