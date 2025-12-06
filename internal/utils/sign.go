@@ -83,14 +83,24 @@ func yiSign(params map[string]interface{}, key string) (string, string) {
 var defaultUseList = []string{"mchId", "channelId", "mchOrderNo", "amount", "notifyUrl", "jumpUrl"}
 
 // GetSign 根据 compatible 参数选择签名方法
+// useList 为 nil 时，使用所有字段（不限制）
+// useList 为空数组 []string{} 时，使用默认字段列表
 func GetSign(data map[string]interface{}, key string, useList []string, optionalArgs []string, compatible int) (string, string) {
 	if compatible == 1 {
 		return yiSign(data, key)
 	}
 
+	// 如果 useList 为 nil，使用所有字段
 	if useList == nil {
+		// 使用所有字段进行签名
+		return toSign(data, key)
+	}
+
+	// 如果 useList 为空数组，使用默认字段列表
+	if len(useList) == 0 {
 		useList = defaultUseList
 	}
+
 	if optionalArgs == nil {
 		optionalArgs = []string{}
 	}

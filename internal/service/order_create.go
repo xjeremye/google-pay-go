@@ -636,6 +636,7 @@ func (s *OrderService) buildResponse(orderCtx *OrderCreateContext, payURL string
 			"payOrderId": response.PayOrderID,
 			"payUrl":     response.PayURL2,
 		}
+		// 响应签名使用所有字段（useList 为 nil 表示使用所有字段）
 		response.Sign = utils.GenerateResponseSign(dataMap, orderCtx.SignKey, orderCtx.Compatible)
 	}
 
