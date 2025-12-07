@@ -12,6 +12,8 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/models"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // CacheRefreshService 缓存刷新服务（增量更新版本）
@@ -23,23 +25,30 @@ type CacheRefreshService struct {
 	lastRefreshTime time.Time
 	// 刷新窗口（查询最近多少秒内更新的数据）
 	refreshWindow time.Duration
+	// 无日志的数据库会话（用于 cache refresh，不打印 SQL 日志）
+	dbNoLog *gorm.DB
 }
 
 // NewCacheRefreshService 创建缓存刷新服务
 func NewCacheRefreshService() *CacheRefreshService {
 	now := time.Now()
+	// 创建一个禁用日志的数据库会话，用于 cache refresh
+	dbNoLog := database.DB.Session(&gorm.Session{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	return &CacheRefreshService{
 		redis:           database.RDB,
 		cacheExpiry:     24 * time.Hour, // 缓存过期时间
 		stopChan:        make(chan struct{}),
 		lastRefreshTime: now.Add(-2 * time.Second), // 初始化为2秒前，确保第一次查询所有数据
 		refreshWindow:   2 * time.Second,           // 查询最近2秒内更新的数据
+		dbNoLog:         dbNoLog,
 	}
 }
 
 // Start 启动缓存刷新服务
 func (s *CacheRefreshService) Start(ctx context.Context) {
-	ticker := time.NewTicker(3 * time.Second) // 每秒刷新一次
+	ticker := time.NewTicker(1 * time.Second) // 每秒刷新一次
 	defer ticker.Stop()
 
 	// 立即执行一次全量刷新（初始化）
@@ -112,7 +121,7 @@ func (s *CacheRefreshService) refreshUsersIncremental(ctx context.Context, since
 			UpdateDatetime *time.Time `gorm:"column:update_datetime"`
 		}
 
-		if err := database.DB.Table("dvadmin_system_users").
+		if err := s.dbNoLog.Table("dvadmin_system_users").
 			Select("id, key, status, update_datetime").
 			Find(&users).Error; err != nil {
 			return
@@ -154,23 +163,21 @@ func (s *CacheRefreshService) refreshUsersIncremental(ctx context.Context, since
 		return
 	}
 
-	// 增量刷新：检查表的最后更新时间
-	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
-
-	// 如果表没有更新，跳过
-	if !tableLastUpdate.IsZero() && !tableLastUpdate.After(since) {
-		return
-	}
-
-	// 查询表的实际最后更新时间（从数据库获取）
+	// 增量刷新：先查询数据库的实际最后更新时间
 	var maxUpdateTime time.Time
-	database.DB.Table("dvadmin_system_users").
+	s.dbNoLog.Table("dvadmin_system_users").
 		Select("MAX(update_datetime) as max_time").
 		Scan(&maxUpdateTime)
 
-	// 如果表没有更新，跳过
-	if !maxUpdateTime.IsZero() && !maxUpdateTime.After(since) {
-		return
+	// 获取缓存的表的最后更新时间
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+
+	// 如果数据库的更新时间没有变化，跳过
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		// 如果数据库的更新时间没有超过缓存的更新时间，说明没有新数据
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
 	}
 
 	// 查询需要刷新的用户
@@ -181,7 +188,7 @@ func (s *CacheRefreshService) refreshUsersIncremental(ctx context.Context, since
 		UpdateDatetime *time.Time `gorm:"column:update_datetime"`
 	}
 
-	query := database.DB.Table("dvadmin_system_users").
+	query := s.dbNoLog.Table("dvadmin_system_users").
 		Select("id, key, status, update_datetime").
 		Where("update_datetime > ? OR update_datetime IS NULL", since)
 
@@ -207,11 +214,19 @@ func (s *CacheRefreshService) refreshUsersIncremental(ctx context.Context, since
 		if data, err := json.Marshal(userData); err == nil {
 			_ = s.redis.Set(ctx, cacheKey, data, 1*time.Hour).Err()
 		}
+
+		// 更新 maxUpdateTime（如果当前记录的更新时间更大）
+		if user.UpdateDatetime != nil && user.UpdateDatetime.After(maxUpdateTime) {
+			maxUpdateTime = *user.UpdateDatetime
+		}
 	}
 
 	// 更新表的最后更新时间
 	if !maxUpdateTime.IsZero() {
 		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	} else if tableLastUpdate.IsZero() {
+		// 如果所有记录的 update_datetime 都是 NULL，且这是首次刷新，使用当前时间
+		s.setTableUpdateTime(ctx, tableKey, time.Now())
 	}
 }
 
@@ -219,32 +234,64 @@ func (s *CacheRefreshService) refreshUsersIncremental(ctx context.Context, since
 func (s *CacheRefreshService) refreshMerchantsIncremental(ctx context.Context, since time.Time) {
 	tableKey := "table:dvadmin_merchant"
 
-	// 获取表的最后更新时间
-	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+	// 全量刷新时，直接查询所有商户
+	if since.IsZero() {
+		var merchants []models.Merchant
+		if err := s.dbNoLog.Model(&models.Merchant{}).Find(&merchants).Error; err != nil {
+			return
+		}
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !tableLastUpdate.IsZero() && !tableLastUpdate.After(since) {
+		// 更新所有商户的缓存
+		var maxUpdateTime time.Time
+		for _, merchant := range merchants {
+			cacheKey := fmt.Sprintf("merchant:%d", merchant.ID)
+
+			// 更新缓存
+			if data, err := json.Marshal(merchant); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+			}
+
+			// 记录最大的更新时间
+			if merchant.UpdateDatetime != nil && merchant.UpdateDatetime.After(maxUpdateTime) {
+				maxUpdateTime = *merchant.UpdateDatetime
+			}
+		}
+
+		// 更新表的最后更新时间
+		if !maxUpdateTime.IsZero() {
+			s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+		} else {
+			s.setTableUpdateTime(ctx, tableKey, time.Now())
+		}
 		return
 	}
 
-	// 查询表的实际最后更新时间（从数据库获取）
+	// 增量刷新：先查询数据库的实际最后更新时间
 	var maxUpdateTime time.Time
-	database.DB.Model(&models.Merchant{}).
+	s.dbNoLog.Model(&models.Merchant{}).
 		Select("MAX(update_datetime) as max_time").
 		Scan(&maxUpdateTime)
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !maxUpdateTime.IsZero() && !maxUpdateTime.After(since) {
-		return
+	// 获取缓存的表的最后更新时间
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+
+	// 如果数据库的更新时间没有变化，跳过
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		// 如果数据库的更新时间没有超过缓存的更新时间，说明没有新数据
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
+	} else if !maxUpdateTime.IsZero() && tableLastUpdate.IsZero() {
+		// 如果数据库有更新时间但缓存没有，说明是首次刷新，需要刷新
+	} else if maxUpdateTime.IsZero() {
+		// 如果数据库没有更新时间（所有记录都是 NULL），检查是否有 NULL 值的记录需要刷新
+		// 这里简化处理，每次都查询一次 NULL 值的记录
 	}
 
+	// 查询需要刷新的商户（update_datetime > since 或 update_datetime IS NULL）
 	var merchants []models.Merchant
-	query := database.DB.Model(&models.Merchant{})
-
-	// 如果有时间限制，只查询最近更新的
-	if !since.IsZero() {
-		query = query.Where("update_datetime > ? OR update_datetime IS NULL", since)
-	}
+	query := s.dbNoLog.Model(&models.Merchant{}).
+		Where("update_datetime > ? OR update_datetime IS NULL", since)
 
 	if err := query.Find(&merchants).Error; err != nil {
 		return
@@ -258,11 +305,19 @@ func (s *CacheRefreshService) refreshMerchantsIncremental(ctx context.Context, s
 		if data, err := json.Marshal(merchant); err == nil {
 			_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
 		}
+
+		// 更新 maxUpdateTime（如果当前记录的更新时间更大）
+		if merchant.UpdateDatetime != nil && merchant.UpdateDatetime.After(maxUpdateTime) {
+			maxUpdateTime = *merchant.UpdateDatetime
+		}
 	}
 
 	// 更新表的最后更新时间
 	if !maxUpdateTime.IsZero() {
 		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	} else if tableLastUpdate.IsZero() {
+		// 如果所有记录的 update_datetime 都是 NULL，且这是首次刷新，使用当前时间
+		s.setTableUpdateTime(ctx, tableKey, time.Now())
 	}
 }
 
@@ -280,7 +335,7 @@ func (s *CacheRefreshService) refreshTenantsIncremental(ctx context.Context, sin
 
 	// 查询表的实际最后更新时间（从数据库获取）
 	var maxUpdateTime time.Time
-	database.DB.Model(&models.Tenant{}).
+	s.dbNoLog.Model(&models.Tenant{}).
 		Select("MAX(update_datetime) as max_time").
 		Scan(&maxUpdateTime)
 
@@ -290,7 +345,7 @@ func (s *CacheRefreshService) refreshTenantsIncremental(ctx context.Context, sin
 	}
 
 	var tenants []models.Tenant
-	query := database.DB.Model(&models.Tenant{})
+	query := s.dbNoLog.Model(&models.Tenant{})
 
 	if !since.IsZero() {
 		query = query.Where("update_datetime > ? OR update_datetime IS NULL", since)
@@ -319,31 +374,57 @@ func (s *CacheRefreshService) refreshTenantsIncremental(ctx context.Context, sin
 func (s *CacheRefreshService) refreshPayChannelsIncremental(ctx context.Context, since time.Time) {
 	tableKey := "table:dvadmin_pay_channel"
 
-	// 获取表的最后更新时间
-	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+	// 全量刷新时，直接查询所有渠道
+	if since.IsZero() {
+		var channels []models.PayChannel
+		if err := s.dbNoLog.Model(&models.PayChannel{}).Find(&channels).Error; err != nil {
+			return
+		}
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !tableLastUpdate.IsZero() && !tableLastUpdate.After(since) {
+		// 更新所有渠道的缓存
+		var maxUpdateTime time.Time
+		for _, channel := range channels {
+			cacheKey := fmt.Sprintf("channel:%d", channel.ID)
+
+			if data, err := json.Marshal(channel); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+			}
+
+			// 记录最大的更新时间
+			if channel.UpdateDatetime != nil && channel.UpdateDatetime.After(maxUpdateTime) {
+				maxUpdateTime = *channel.UpdateDatetime
+			}
+		}
+
+		// 更新表的最后更新时间
+		if !maxUpdateTime.IsZero() {
+			s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+		} else {
+			s.setTableUpdateTime(ctx, tableKey, time.Now())
+		}
 		return
 	}
 
-	// 查询表的实际最后更新时间（从数据库获取）
+	// 增量刷新：先查询数据库的实际最后更新时间
 	var maxUpdateTime time.Time
-	database.DB.Model(&models.PayChannel{}).
+	s.dbNoLog.Model(&models.PayChannel{}).
 		Select("MAX(update_datetime) as max_time").
 		Scan(&maxUpdateTime)
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !maxUpdateTime.IsZero() && !maxUpdateTime.After(since) {
-		return
+	// 获取缓存的表的最后更新时间
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+
+	// 如果数据库的更新时间没有变化，跳过
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
 	}
 
+	// 查询需要刷新的渠道（update_datetime > since 或 update_datetime IS NULL）
 	var channels []models.PayChannel
-	query := database.DB.Model(&models.PayChannel{})
-
-	if !since.IsZero() {
-		query = query.Where("update_datetime > ? OR update_datetime IS NULL", since)
-	}
+	query := s.dbNoLog.Model(&models.PayChannel{}).
+		Where("update_datetime > ? OR update_datetime IS NULL", since)
 
 	if err := query.Find(&channels).Error; err != nil {
 		return
@@ -356,11 +437,18 @@ func (s *CacheRefreshService) refreshPayChannelsIncremental(ctx context.Context,
 		if data, err := json.Marshal(channel); err == nil {
 			_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
 		}
+
+		// 更新 maxUpdateTime（如果当前记录的更新时间更大）
+		if channel.UpdateDatetime != nil && channel.UpdateDatetime.After(maxUpdateTime) {
+			maxUpdateTime = *channel.UpdateDatetime
+		}
 	}
 
 	// 更新表的最后更新时间
 	if !maxUpdateTime.IsZero() {
 		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	} else if tableLastUpdate.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, time.Now())
 	}
 }
 
@@ -368,31 +456,57 @@ func (s *CacheRefreshService) refreshPayChannelsIncremental(ctx context.Context,
 func (s *CacheRefreshService) refreshPluginsIncremental(ctx context.Context, since time.Time) {
 	tableKey := "table:dvadmin_pay_plugin"
 
-	// 获取表的最后更新时间
-	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+	// 全量刷新时，直接查询所有插件
+	if since.IsZero() {
+		var plugins []models.PayPlugin
+		if err := s.dbNoLog.Model(&models.PayPlugin{}).Find(&plugins).Error; err != nil {
+			return
+		}
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !tableLastUpdate.IsZero() && !tableLastUpdate.After(since) {
+		// 更新所有插件的缓存
+		var maxUpdateTime time.Time
+		for _, plugin := range plugins {
+			cacheKey := fmt.Sprintf("plugin:%d", plugin.ID)
+
+			if data, err := json.Marshal(plugin); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+			}
+
+			// 记录最大的更新时间
+			if plugin.UpdateDatetime != nil && plugin.UpdateDatetime.After(maxUpdateTime) {
+				maxUpdateTime = *plugin.UpdateDatetime
+			}
+		}
+
+		// 更新表的最后更新时间
+		if !maxUpdateTime.IsZero() {
+			s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+		} else {
+			s.setTableUpdateTime(ctx, tableKey, time.Now())
+		}
 		return
 	}
 
-	// 查询表的实际最后更新时间（从数据库获取）
+	// 增量刷新：先查询数据库的实际最后更新时间
 	var maxUpdateTime time.Time
-	database.DB.Model(&models.PayPlugin{}).
+	s.dbNoLog.Model(&models.PayPlugin{}).
 		Select("MAX(update_datetime) as max_time").
 		Scan(&maxUpdateTime)
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !maxUpdateTime.IsZero() && !maxUpdateTime.After(since) {
-		return
+	// 获取缓存的表的最后更新时间
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+
+	// 如果数据库的更新时间没有变化，跳过
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
 	}
 
+	// 查询需要刷新的插件（update_datetime > since 或 update_datetime IS NULL）
 	var plugins []models.PayPlugin
-	query := database.DB.Model(&models.PayPlugin{})
-
-	if !since.IsZero() {
-		query = query.Where("update_datetime > ? OR update_datetime IS NULL", since)
-	}
+	query := s.dbNoLog.Model(&models.PayPlugin{}).
+		Where("update_datetime > ? OR update_datetime IS NULL", since)
 
 	if err := query.Find(&plugins).Error; err != nil {
 		return
@@ -405,11 +519,18 @@ func (s *CacheRefreshService) refreshPluginsIncremental(ctx context.Context, sin
 		if data, err := json.Marshal(plugin); err == nil {
 			_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
 		}
+
+		// 更新 maxUpdateTime（如果当前记录的更新时间更大）
+		if plugin.UpdateDatetime != nil && plugin.UpdateDatetime.After(maxUpdateTime) {
+			maxUpdateTime = *plugin.UpdateDatetime
+		}
 	}
 
 	// 更新表的最后更新时间
 	if !maxUpdateTime.IsZero() {
 		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	} else if tableLastUpdate.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, time.Now())
 	}
 }
 
@@ -417,33 +538,68 @@ func (s *CacheRefreshService) refreshPluginsIncremental(ctx context.Context, sin
 func (s *CacheRefreshService) refreshPluginConfigsIncremental(ctx context.Context, since time.Time) {
 	tableKey := "table:dvadmin_pay_plugin_config"
 
-	// 获取表的最后更新时间
-	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+	// 全量刷新时，直接查询所有插件配置
+	if since.IsZero() {
+		var plugins []models.PayPlugin
+		if err := s.dbNoLog.Find(&plugins).Error; err != nil {
+			return
+		}
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !tableLastUpdate.IsZero() && !tableLastUpdate.After(since) {
+		var maxUpdateTime time.Time
+		for _, plugin := range plugins {
+			var configs []models.PayPluginConfig
+			if err := s.dbNoLog.Where("parent_id = ?", plugin.ID).Find(&configs).Error; err != nil {
+				continue
+			}
+
+			if len(configs) > 0 {
+				cacheKey := fmt.Sprintf("plugin_config:%d", plugin.ID)
+				if data, err := json.Marshal(configs); err == nil {
+					_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+				}
+
+				// 记录最大的更新时间
+				for _, config := range configs {
+					if config.UpdateDatetime != nil && config.UpdateDatetime.After(maxUpdateTime) {
+						maxUpdateTime = *config.UpdateDatetime
+					}
+				}
+			}
+		}
+
+		// 更新表的最后更新时间
+		if !maxUpdateTime.IsZero() {
+			s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+		} else {
+			s.setTableUpdateTime(ctx, tableKey, time.Now())
+		}
 		return
 	}
 
-	// 查询表的实际最后更新时间（从数据库获取）
+	// 增量刷新：先查询数据库的实际最后更新时间
 	var maxUpdateTime time.Time
-	database.DB.Model(&models.PayPluginConfig{}).
+	s.dbNoLog.Model(&models.PayPluginConfig{}).
 		Select("MAX(update_datetime) as max_time").
 		Scan(&maxUpdateTime)
 
-	// 如果表没有更新，跳过
-	if !since.IsZero() && !maxUpdateTime.IsZero() && !maxUpdateTime.After(since) {
-		return
+	// 获取缓存的表的最后更新时间
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+
+	// 如果数据库的更新时间没有变化，跳过
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
 	}
 
 	var plugins []models.PayPlugin
-	if err := database.DB.Find(&plugins).Error; err != nil {
+	if err := s.dbNoLog.Find(&plugins).Error; err != nil {
 		return
 	}
 
 	for _, plugin := range plugins {
 		var configs []models.PayPluginConfig
-		query := database.DB.Where("parent_id = ?", plugin.ID)
+		query := s.dbNoLog.Where("parent_id = ?", plugin.ID)
 
 		// 如果有时间限制，只查询最近更新的配置
 		if !since.IsZero() {
@@ -478,7 +634,7 @@ func (s *CacheRefreshService) refreshPluginPayTypesIncremental(ctx context.Conte
 	// 策略1：检查有更新的插件，刷新其支付类型关联
 	var updatedPlugins []models.PayPlugin
 	if !since.IsZero() {
-		database.DB.Model(&models.PayPlugin{}).
+		s.dbNoLog.Model(&models.PayPlugin{}).
 			Where("update_datetime > ? OR update_datetime IS NULL", since).
 			Find(&updatedPlugins)
 	}
@@ -487,7 +643,7 @@ func (s *CacheRefreshService) refreshPluginPayTypesIncremental(ctx context.Conte
 	var updatedPayTypeIDs []int64
 	if !since.IsZero() {
 		var updatedPayTypes []models.PayType
-		database.DB.Model(&models.PayType{}).
+		s.dbNoLog.Model(&models.PayType{}).
 			Where("update_datetime > ? OR update_datetime IS NULL", since).
 			Find(&updatedPayTypes)
 		for _, pt := range updatedPayTypes {
@@ -506,7 +662,7 @@ func (s *CacheRefreshService) refreshPluginPayTypesIncremental(ctx context.Conte
 	// 添加与更新支付类型相关的插件
 	if len(updatedPayTypeIDs) > 0 {
 		var relatedPluginIDs []int64
-		database.DB.Table("dvadmin_pay_plugin_pay_types").
+		s.dbNoLog.Table("dvadmin_pay_plugin_pay_types").
 			Where("paytype_id IN ?", updatedPayTypeIDs).
 			Pluck("payplugin_id", &relatedPluginIDs)
 		for _, pluginID := range relatedPluginIDs {
@@ -517,7 +673,7 @@ func (s *CacheRefreshService) refreshPluginPayTypesIncremental(ctx context.Conte
 	// 策略3：全量刷新时，刷新所有插件的支付类型关联
 	if since.IsZero() {
 		var allPlugins []models.PayPlugin
-		database.DB.Find(&allPlugins)
+		s.dbNoLog.Find(&allPlugins)
 		for _, plugin := range allPlugins {
 			pluginIDsToRefresh[plugin.ID] = true
 		}
@@ -534,7 +690,7 @@ func (s *CacheRefreshService) refreshPluginPayTypesIncremental(ctx context.Conte
 // refreshPluginPayTypesForPlugin 刷新指定插件的支付类型关联
 func (s *CacheRefreshService) refreshPluginPayTypesForPlugin(ctx context.Context, pluginID int64) {
 	var payTypes []models.PayType
-	if err := database.DB.Table("dvadmin_pay_type").
+	if err := s.dbNoLog.Table("dvadmin_pay_type").
 		Joins("INNER JOIN dvadmin_pay_plugin_pay_types ON dvadmin_pay_type.id = dvadmin_pay_plugin_pay_types.paytype_id").
 		Where("dvadmin_pay_plugin_pay_types.payplugin_id = ?", pluginID).
 		Find(&payTypes).Error; err != nil {
