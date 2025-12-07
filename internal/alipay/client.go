@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/models"
 )
 
@@ -34,20 +35,83 @@ type Client struct {
 }
 
 // NewClient 创建支付宝客户端
+// 参考 Python: get_alipay_sdk 的逻辑
 func NewClient(product *models.AlipayProduct, notifyURL string, isOrder bool) (*Client, error) {
 	// 根据产品类型选择配置
 	var appID, privateKey, publicKey string
 	var signType string
 	var appAuthToken string
+	var appPublicCrt, alipayPublicCrt, alipayRootCrt string
 
 	// 参考 Python: get_alipay_sdk 的逻辑
-	// 注意：这里简化处理，直接使用产品的配置
-	// TODO: 实现完整的父商户配置逻辑
-	appID = product.AppID
-	privateKey = product.PrivateKey
-	publicKey = product.PublicKey
-	signType = product.SignType
-	appAuthToken = product.AppAuthToken
+	// 拉单用父商户的appid,转账用自己的appid
+	// if (product.account_type == 0 and is_order) or (product.account_type in [4, 6, 7]):
+	if (product.AccountType == 0 && isOrder) || (product.AccountType == 4 || product.AccountType == 6 || product.AccountType == 7) {
+		// 子商户/服务商授权商户，需要使用父商户的配置
+		if product.AccountType != 7 {
+			// 使用直接父商户
+			if product.ParentID == nil {
+				return nil, fmt.Errorf("子商户产品缺少父商户配置")
+			}
+
+			// 查询父产品
+			var parent models.AlipayProduct
+			if err := database.DB.Where("id = ?", *product.ParentID).First(&parent).Error; err != nil {
+				return nil, fmt.Errorf("查询父商户失败: %w", err)
+			}
+
+			appID = parent.AppID
+			privateKey = parent.PrivateKey
+			publicKey = parent.PublicKey
+			signType = parent.SignType
+			appPublicCrt = parent.AppPublicCrt
+			alipayPublicCrt = parent.AlipayPublicCrt
+			alipayRootCrt = parent.AlipayRootCrt
+			// app_auth_token 仍然使用子商户的
+			appAuthToken = product.AppAuthToken
+		} else {
+			// account_type == 7，使用父商户的父商户（祖父商户）
+			if product.ParentID == nil {
+				return nil, fmt.Errorf("服务商授权商户缺少父商户配置")
+			}
+
+			// 查询父产品
+			var parent models.AlipayProduct
+			if err := database.DB.Where("id = ?", *product.ParentID).First(&parent).Error; err != nil {
+				return nil, fmt.Errorf("查询父商户失败: %w", err)
+			}
+
+			// 查询祖父商户
+			if parent.ParentID == nil {
+				return nil, fmt.Errorf("服务商授权商户缺少祖父商户配置")
+			}
+
+			var grandParent models.AlipayProduct
+			if err := database.DB.Where("id = ?", *parent.ParentID).First(&grandParent).Error; err != nil {
+				return nil, fmt.Errorf("查询祖父商户失败: %w", err)
+			}
+
+			appID = grandParent.AppID
+			privateKey = grandParent.PrivateKey
+			publicKey = grandParent.PublicKey
+			signType = grandParent.SignType
+			appPublicCrt = grandParent.AppPublicCrt
+			alipayPublicCrt = grandParent.AlipayPublicCrt
+			alipayRootCrt = grandParent.AlipayRootCrt
+			// app_auth_token 仍然使用子商户的
+			appAuthToken = product.AppAuthToken
+		}
+	} else {
+		// 使用产品自己的配置
+		appID = product.AppID
+		privateKey = product.PrivateKey
+		publicKey = product.PublicKey
+		signType = product.SignType
+		appPublicCrt = product.AppPublicCrt
+		alipayPublicCrt = product.AlipayPublicCrt
+		alipayRootCrt = product.AlipayRootCrt
+		appAuthToken = product.AppAuthToken
+	}
 
 	// 解析私钥
 	appPrivateKey, err := parsePrivateKey(privateKey)
@@ -55,10 +119,29 @@ func NewClient(product *models.AlipayProduct, notifyURL string, isOrder bool) (*
 		return nil, fmt.Errorf("解析应用私钥失败: %w", err)
 	}
 
-	// 解析公钥
-	alipayPublicKey, err := parsePublicKey(publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("解析支付宝公钥失败: %w", err)
+	// 判断是否使用数字证书（signType == "0" 表示普通公钥，其他表示数字证书）
+	isDC := signType != "0" && signType != ""
+
+	// 解析公钥（证书模式下可能不需要公钥字符串，使用证书代替）
+	var alipayPublicKey *rsa.PublicKey
+	if !isDC {
+		// 普通公钥模式，必须解析公钥
+		var err error
+		alipayPublicKey, err = parsePublicKey(publicKey)
+		if err != nil {
+			return nil, fmt.Errorf("解析支付宝公钥失败: %w", err)
+		}
+	} else {
+		// 证书模式，公钥可以为空（使用证书代替）
+		// 但如果提供了公钥，也可以解析（用于验证回调等场景）
+		if publicKey != "" {
+			var err error
+			alipayPublicKey, err = parsePublicKey(publicKey)
+			if err != nil {
+				// 证书模式下公钥解析失败不影响，只记录警告
+				// 因为主要使用证书进行签名和验证
+			}
+		}
 	}
 
 	// 设置代理
@@ -77,9 +160,6 @@ func NewClient(product *models.AlipayProduct, notifyURL string, isOrder bool) (*
 		Timeout: 15 * time.Second,
 	}
 
-	// 判断是否使用数字证书（signType == "0" 表示普通公钥，其他表示数字证书）
-	isDC := signType != "0" && signType != ""
-
 	client := &Client{
 		AppID:           appID,
 		AppPrivateKey:   appPrivateKey,
@@ -95,10 +175,14 @@ func NewClient(product *models.AlipayProduct, notifyURL string, isOrder bool) (*
 
 	// 如果是数字证书模式，设置证书
 	if isDC {
-		// TODO: 从产品获取证书信息
-		// client.AppPublicCert = product.AppPublicCrt
-		// client.AlipayPublicCert = product.AlipayPublicCrt
-		// client.AlipayRootCert = product.AlipayRootCrt
+		client.AppPublicCert = appPublicCrt
+		client.AlipayPublicCert = alipayPublicCrt
+		client.AlipayRootCert = alipayRootCrt
+
+		// 验证证书是否已配置（证书模式下必须提供证书）
+		if appPublicCrt == "" || alipayPublicCrt == "" || alipayRootCrt == "" {
+			return nil, fmt.Errorf("证书模式下必须提供完整的证书配置（应用公钥证书、支付宝公钥证书、支付宝根证书）")
+		}
 	}
 
 	return client, nil
@@ -140,32 +224,67 @@ func parsePrivateKey(keyStr string) (*rsa.PrivateKey, error) {
 }
 
 // parsePublicKey 解析 RSA 公钥
+// 参考 Python: cut_key 函数和 get_alipay_sdk 中的公钥处理
 func parsePublicKey(keyStr string) (*rsa.PublicKey, error) {
+	if keyStr == "" {
+		return nil, fmt.Errorf("公钥不能为空")
+	}
+
 	// 移除可能的头部和尾部标记
 	keyStr = strings.TrimSpace(keyStr)
+
+	// 如果已经是完整的 PEM 格式，直接解析
+	if strings.Contains(keyStr, "-----BEGIN PUBLIC KEY-----") {
+		block, _ := pem.Decode([]byte(keyStr))
+		if block != nil {
+			publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+			if err == nil {
+				if rsaKey, ok := publicKey.(*rsa.PublicKey); ok {
+					return rsaKey, nil
+				}
+			}
+		}
+	}
+
+	// 移除头部和尾部标记
 	keyStr = strings.ReplaceAll(keyStr, "-----BEGIN PUBLIC KEY-----", "")
 	keyStr = strings.ReplaceAll(keyStr, "-----END PUBLIC KEY-----", "")
 	keyStr = strings.ReplaceAll(keyStr, "\n", "")
+	keyStr = strings.ReplaceAll(keyStr, "\r", "")
 	keyStr = strings.ReplaceAll(keyStr, " ", "")
+	keyStr = strings.ReplaceAll(keyStr, "\t", "")
+
+	if keyStr == "" {
+		return nil, fmt.Errorf("公钥内容为空")
+	}
 
 	// 每 64 个字符换行（PEM 格式要求）
 	formattedKey := formatKey(keyStr, 64)
 
-	block, _ := pem.Decode([]byte("-----BEGIN PUBLIC KEY-----\n" + formattedKey + "\n-----END PUBLIC KEY-----"))
+	// 构建完整的 PEM 格式
+	pemKey := "-----BEGIN PUBLIC KEY-----\n" + formattedKey + "\n-----END PUBLIC KEY-----"
+
+	block, _ := pem.Decode([]byte(pemKey))
 	if block == nil {
-		return nil, fmt.Errorf("无法解析公钥")
+		return nil, fmt.Errorf("无法解析公钥: PEM 解码失败")
 	}
 
+	// 尝试解析 PKIX 格式
 	publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("解析公钥失败: %w", err)
+		// 如果失败，尝试解析 RSA 公钥（PKCS#1 格式）
+		rsaKey, err2 := x509.ParsePKCS1PublicKey(block.Bytes)
+		if err2 != nil {
+			return nil, fmt.Errorf("解析公钥失败: PKIX=%v, PKCS1=%v", err, err2)
+		}
+		return rsaKey, nil
 	}
 
 	if rsaKey, ok := publicKey.(*rsa.PublicKey); ok {
 		return rsaKey, nil
 	}
 
-	return nil, fmt.Errorf("公钥格式不正确")
+	return nil, fmt.Errorf("公钥格式不正确: 不是 RSA 公钥")
 }
 
 // formatKey 格式化密钥字符串
