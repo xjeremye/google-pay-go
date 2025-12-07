@@ -103,6 +103,9 @@ func (s *CacheRefreshService) refreshAllIncremental(ctx context.Context, fullRef
 	// 刷新插件支付类型缓存
 	s.refreshPluginPayTypesIncremental(ctx, refreshSince)
 
+	// 刷新租户余额缓存（关键数据，必须每秒更新以确保一致性）
+	s.refreshTenantBalancesIncremental(ctx, refreshSince)
+
 	// 更新最后刷新时间
 	s.lastRefreshTime = now.Add(-500 * time.Millisecond) // 留500ms缓冲，避免遗漏
 }
@@ -773,4 +776,44 @@ func (s *CacheRefreshService) getTableUpdateTime(ctx context.Context, tableKey s
 // setTableUpdateTime 设置表的最后更新时间
 func (s *CacheRefreshService) setTableUpdateTime(ctx context.Context, tableKey string, updateTime time.Time) {
 	_ = s.redis.Set(ctx, tableKey, updateTime.Format(time.RFC3339Nano), s.cacheExpiry).Err()
+}
+
+// refreshTenantBalancesIncremental 增量刷新租户余额缓存（关键数据，必须每秒更新）
+// 余额是实时变化的，需要频繁刷新以确保一致性
+func (s *CacheRefreshService) refreshTenantBalancesIncremental(ctx context.Context, since time.Time) {
+	// 余额数据变化频繁，每次刷新都查询所有租户的余额
+	// 使用 SELECT FOR UPDATE 或直接查询最新数据
+	var tenants []struct {
+		ID      int64 `gorm:"column:id"`
+		Balance int64 `gorm:"column:balance"`
+		PreTax  int64 `gorm:"column:pre_tax"`
+		Trust   bool  `gorm:"column:trust"`
+	}
+
+	// 查询所有租户的余额信息（只查询必要字段，减少数据库压力）
+	if err := s.dbNoLog.Table("dvadmin_tenant").
+		Select("id, balance, pre_tax, trust").
+		Find(&tenants).Error; err != nil {
+		return
+	}
+
+	// 更新所有租户的余额缓存（1秒过期，与刷新频率同步）
+	for _, tenant := range tenants {
+		cacheKey := fmt.Sprintf("tenant_balance:%d", tenant.ID)
+
+		balanceData := struct {
+			Balance int64 `json:"balance"`
+			PreTax  int64 `json:"pre_tax"`
+			Trust   bool  `json:"trust"`
+		}{
+			Balance: tenant.Balance,
+			PreTax:  tenant.PreTax,
+			Trust:   tenant.Trust,
+		}
+
+		if data, err := json.Marshal(balanceData); err == nil {
+			// 缓存1秒过期，与刷新频率同步
+			_ = s.redis.Set(ctx, cacheKey, data, 1*time.Second).Err()
+		}
+	}
 }

@@ -177,6 +177,95 @@ func (s *CacheService) GetPayChannel(ctx context.Context, channelID int64) (*mod
 	return &channel, nil
 }
 
+// GetAvailableDomains 获取可用域名列表（带缓存，按上游类型分类）
+// upstream: 5=支付宝, 6=微信, 0=全部
+func (s *CacheService) GetAvailableDomains(ctx context.Context, upstream int) ([]models.PayDomain, error) {
+	var cacheKey string
+	switch upstream {
+	case 5:
+		cacheKey = "domains:alipay"
+	case 6:
+		cacheKey = "domains:wechat"
+	default:
+		cacheKey = "domains:all"
+	}
+
+	// 尝试从缓存获取
+	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
+		var domains []models.PayDomain
+		if err := json.Unmarshal([]byte(val), &domains); err == nil {
+			return domains, nil
+		}
+	}
+
+	// 从数据库获取
+	var domains []models.PayDomain
+	query := database.DB.Model(&models.PayDomain{}).Where("status = ?", true)
+
+	// 根据上游类型过滤
+	if upstream == 6 {
+		// 微信
+		query = query.Where("wechat_status = ?", true)
+	} else if upstream == 5 {
+		// 支付宝
+		query = query.Where("pay_status = ?", true)
+	}
+	// else: 其他类型，只检查 status
+
+	if err := query.Find(&domains).Error; err != nil {
+		return nil, err
+	}
+
+	// 缓存域名列表（5分钟过期，因为域名状态可能变化）
+	if data, err := json.Marshal(domains); err == nil {
+		s.redis.Set(ctx, cacheKey, data, 5*time.Minute)
+	}
+
+	return domains, nil
+}
+
+// GetTenantBalance 获取租户余额（带短期缓存，与缓存刷新服务同步）
+// 缓存刷新服务每秒更新一次余额，这里使用1秒缓存确保一致性
+func (s *CacheService) GetTenantBalance(ctx context.Context, tenantID int64) (balance int64, preTax int64, trust bool, err error) {
+	cacheKey := fmt.Sprintf("tenant_balance:%d", tenantID)
+
+	// 尝试从缓存获取（1秒过期，与缓存刷新服务同步）
+	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
+		var balanceData struct {
+			Balance int64 `json:"balance"`
+			PreTax  int64 `json:"pre_tax"`
+			Trust   bool  `json:"trust"`
+		}
+		if err := json.Unmarshal([]byte(val), &balanceData); err == nil {
+			return balanceData.Balance, balanceData.PreTax, balanceData.Trust, nil
+		}
+	}
+
+	// 从数据库获取（降级方案：如果缓存未命中）
+	var tenant models.Tenant
+	if err := database.DB.Select("id, balance, pre_tax, trust").
+		Where("id = ?", tenantID).
+		First(&tenant).Error; err != nil {
+		return 0, 0, false, err
+	}
+
+	// 缓存余额信息（1秒过期，与缓存刷新服务同步）
+	balanceData := struct {
+		Balance int64 `json:"balance"`
+		PreTax  int64 `json:"pre_tax"`
+		Trust   bool  `json:"trust"`
+	}{
+		Balance: tenant.Balance,
+		PreTax:  int64(tenant.PreTax),
+		Trust:   tenant.Trust,
+	}
+	if data, err := json.Marshal(balanceData); err == nil {
+		s.redis.Set(ctx, cacheKey, data, 1*time.Second)
+	}
+
+	return tenant.Balance, int64(tenant.PreTax), tenant.Trust, nil
+}
+
 // SystemUser 系统用户模型（用于查询）
 type SystemUser struct {
 	ID       int64  `json:"id"`

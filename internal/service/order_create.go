@@ -101,8 +101,9 @@ type OrderCreateContext struct {
 	TenantUser *SystemUser
 
 	// 订单信息
-	OrderNo string
-	OrderID string
+	OrderNo       string
+	OrderID       string
+	OrderDetailID int64 // 订单详情ID（创建后保存，避免重复查询）
 
 	// 请求信息（用于日志记录）
 	RequestMethod string // 请求方法（GET/POST）
@@ -261,15 +262,20 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 			zap.Int64("total_elapsed_ms", time.Since(startTime).Milliseconds()))
 	}
 
-	// 5. 创建订单和详情（此时已经有产品ID、核销ID等信息）
-	if err := s.createOrderAndDetail(ctx, orderCtx); err != nil {
-		return nil, err
-	}
-
-	// 8. 检查余额
+	// 5. 预检查余额（使用缓存，快速检查）
+	// 注意：这只是预检查，最终检查在创建订单的事务中进行
 	if err := s.validateBalance(ctx, orderCtx); err != nil {
 		return nil, err
 	}
+
+	// 6. 创建订单和详情（此时已经有产品ID、核销ID等信息）
+	// 在事务中会再次检查余额，确保一致性
+	orderDetailID, err := s.createOrderAndDetail(ctx, orderCtx)
+	if err != nil {
+		return nil, err
+	}
+	// 保存订单详情ID到上下文，避免后续重复查询
+	orderCtx.OrderDetailID = orderDetailID
 
 	// 9. 生成支付URL（使用插件系统，此时产品已选择）
 	thirdTime := time.Now()
@@ -441,7 +447,9 @@ func (s *OrderService) validateOutOrderNo(ctx context.Context, orderCtx *OrderCr
 }
 
 // validateChannel 验证渠道
+// 注意：渠道信息从缓存获取，缓存刷新服务每秒更新一次，确保限额等限制的一致性
 func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreateContext, channelID int64) *OrderError {
+	// 从缓存获取渠道信息（缓存刷新服务每秒更新，确保一致性）
 	channel, err := s.cacheService.GetPayChannel(ctx, channelID)
 	if err != nil {
 		return ErrChannelNotFound
@@ -451,17 +459,17 @@ func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreat
 		return ErrChannelDisabled
 	}
 
-	// 检查时间范围
+	// 检查时间范围（基于缓存的渠道信息）
 	if err := s.checkChannelTime(channel); err != nil {
 		return err
 	}
 
-	// 检查金额范围
+	// 检查金额范围（基于缓存的渠道信息，确保限额一致性）
 	if err := s.checkChannelAmount(channel, orderCtx); err != nil {
 		return err
 	}
 
-	// 应用浮动加价
+	// 应用浮动加价（基于缓存的渠道信息）
 	s.applyFloatAmount(channel, orderCtx)
 
 	orderCtx.Channel = channel
@@ -527,7 +535,19 @@ func (s *OrderService) validateDomain(ctx context.Context, orderCtx *OrderCreate
 	// Python: domain_url = get_plugin_pay_domain(ctx.plugin.id, ctx.channel_id)
 	domainURL := s.getPluginPayDomain(ctx, orderCtx.PluginID, orderCtx.ChannelID)
 	if domainURL != "" {
-		// 如果插件设置了域名，尝试从数据库查找
+		// 如果插件设置了域名，尝试从缓存的域名列表中查找
+		domains, err := s.cacheService.GetAvailableDomains(ctx, 0) // 获取所有域名
+		if err == nil {
+			for i := range domains {
+				if domains[i].URL == domainURL {
+					orderCtx.DomainID = &domains[i].ID
+					orderCtx.DomainURL = domains[i].URL
+					orderCtx.Domain = &domains[i]
+					return nil
+				}
+			}
+		}
+		// 如果缓存中没有，尝试从数据库查找（降级方案）
 		var domain models.PayDomain
 		if err := database.DB.Where("url = ?", domainURL).First(&domain).Error; err == nil {
 			orderCtx.DomainID = &domain.ID
@@ -541,42 +561,29 @@ func (s *OrderService) validateDomain(ctx context.Context, orderCtx *OrderCreate
 		return nil
 	}
 
-	// 2. 如果没有插件自定义域名，从可用域名中随机选择一个
+	// 2. 如果没有插件自定义域名，从缓存的可用域名列表中随机选择一个
 	// Python: 根据 plugin_upstream 判断是否支持微信/支付宝
-	var domain models.PayDomain
-	query := database.DB.Model(&models.PayDomain{}).Where("status = ?", true)
-
-	// 根据插件类型过滤
-	// Python: plugin_upstream == 6 表示微信，== 5 表示支付宝
-	if orderCtx.PluginUpstream == 6 {
-		// 微信
-		query = query.Where("wechat_status = ?", true)
-	} else if orderCtx.PluginUpstream == 5 {
-		// 支付宝
-		query = query.Where("pay_status = ?", true)
-	}
-	// else: 其他类型，只检查 status
-
-	// 随机选择一个
-	if err := query.Order("RAND()").First(&domain).Error; err != nil {
+	domains, err := s.cacheService.GetAvailableDomains(ctx, orderCtx.PluginUpstream)
+	if err != nil || len(domains) == 0 {
 		return NewOrderError(ErrCodeCreateFailed, "无可用收银台")
 	}
 
-	orderCtx.DomainID = &domain.ID
-	orderCtx.DomainURL = domain.URL
-	orderCtx.Domain = &domain
+	// 从列表中随机选择一个（使用内存随机，避免数据库 RAND()）
+	selectedDomain := domains[rand.Intn(len(domains))]
+
+	orderCtx.DomainID = &selectedDomain.ID
+	orderCtx.DomainURL = selectedDomain.URL
+	orderCtx.Domain = &selectedDomain
 
 	return nil
 }
 
-// getPluginPayDomain 获取插件自定义域名
+// getPluginPayDomain 获取插件自定义域名（使用带缓存的插件配置服务）
 // 参考 Python: get_plugin_pay_domain(plugin_id: int, channel_id: int)
 func (s *OrderService) getPluginPayDomain(ctx context.Context, pluginID, channelID int64) string {
-	// 从 PayPluginConfig 表中获取插件配置
-	// Python: PayPluginConfig.objects.filter(parent_id=plugin_id, key="pay_domain").first()
-	var config models.PayPluginConfig
-	if err := database.DB.Where("parent_id = ? AND key = ? AND status = ?", pluginID, "pay_domain", true).
-		First(&config).Error; err != nil {
+	// 使用带缓存的插件配置服务
+	config, err := s.pluginService.GetPluginConfigByKey(ctx, pluginID, "pay_domain")
+	if err != nil {
 		// 如果查询失败，返回空字符串
 		return ""
 	}
@@ -602,32 +609,34 @@ func (s *OrderService) getPluginPayDomain(ctx context.Context, pluginID, channel
 	return ""
 }
 
-// validateBalance 检查余额
+// validateBalance 检查余额（使用缓存优化，预检查）
 // 参考 Python: 检查租户余额是否足够
+// 注意：这是预检查，最终检查在创建订单的事务中进行，使用数据库锁确保一致性
 func (s *OrderService) validateBalance(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
 	if orderCtx.Tenant == nil {
 		return nil // 如果没有租户信息，跳过检查
 	}
 
-	// 查询最新的租户信息（包括余额和预占用金额）
-	var tenant models.Tenant
-	if err := database.DB.Select("id, balance, pre_tax, trust").
-		Where("id = ?", orderCtx.TenantID).
-		First(&tenant).Error; err != nil {
+	// 使用缓存的余额查询（1秒缓存，与缓存刷新服务同步）
+	// 缓存刷新服务每秒更新一次余额，确保数据相对新鲜
+	balance, preTax, trust, err := s.cacheService.GetTenantBalance(ctx, orderCtx.TenantID)
+	if err != nil {
 		// 如果查询失败，记录日志但不阻止订单创建（容错处理）
+		// 最终检查在事务中进行
 		return nil
 	}
 
 	// 计算可用余额：余额 - 预占用金额
-	availableBalance := tenant.Balance - int64(tenant.PreTax)
+	availableBalance := balance - preTax
 
 	// 检查余额是否足够
 	if availableBalance < int64(orderCtx.Money) {
 		// 如果 trust=false（不允许负数），则拒绝订单
-		if !tenant.Trust {
+		if !trust {
 			return ErrBalanceInsufficient
 		}
 		// 如果 trust=true（允许负数），允许继续
+		// 注意：最终检查在事务中进行，使用数据库锁确保一致性
 	}
 
 	return nil
@@ -666,6 +675,7 @@ func (s *OrderService) checkChannelTime(channel *models.PayChannel) *OrderError 
 }
 
 // checkChannelAmount 检查渠道金额限制
+// 注意：渠道信息来自缓存，缓存刷新服务每秒更新，确保限额一致性
 func (s *OrderService) checkChannelAmount(channel *models.PayChannel, orderCtx *OrderCreateContext) *OrderError {
 	// 检查固定金额模式
 	if channel.Settled && channel.Moneys != "" {
@@ -712,8 +722,8 @@ func (s *OrderService) applyFloatAmount(channel *models.PayChannel, orderCtx *Or
 	}
 }
 
-// createOrderAndDetail 创建订单和订单详情
-func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+// createOrderAndDetail 创建订单和订单详情，返回订单详情ID（避免后续重复查询）
+func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *OrderCreateContext) (orderDetailID int64, orderError *OrderError) {
 	// 生成订单号
 	orderCtx.OrderNo = utils.GenerateOrderNo()
 	orderCtx.OrderID = utils.GenerateID()
@@ -727,6 +737,31 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 			tx.Rollback()
 		}
 	}()
+
+	// 在事务中再次检查余额，确保一致性（使用数据库锁）
+	// 这是最终检查，确保余额足够才创建订单
+	if orderCtx.Tenant != nil {
+		var tenant models.Tenant
+		// 使用 SELECT FOR UPDATE 锁定行，确保余额检查的一致性
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").
+			Select("id, balance, pre_tax, trust").
+			Where("id = ?", orderCtx.TenantID).
+			First(&tenant).Error; err == nil {
+			// 计算可用余额：余额 - 预占用金额
+			availableBalance := tenant.Balance - int64(tenant.PreTax)
+
+			// 检查余额是否足够
+			if availableBalance < int64(orderCtx.Money) {
+				// 如果 trust=false（不允许负数），则拒绝订单
+				if !tenant.Trust {
+					tx.Rollback()
+					return 0, ErrBalanceInsufficient
+				}
+				// 如果 trust=true（允许负数），允许继续
+			}
+		}
+		// 如果查询失败，记录日志但不阻止订单创建（容错处理）
+	}
 
 	// 构建通道名称（格式：[通道ID]通道名称）
 	productName := ""
@@ -754,7 +789,7 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 
 	if err := tx.Create(order).Error; err != nil {
 		tx.Rollback()
-		return NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单失败: %v", err))
+		return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单失败: %v", err))
 	}
 
 	// 创建订单详情
@@ -789,18 +824,35 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 
 	if err := tx.Create(orderDetail).Error; err != nil {
 		tx.Rollback()
-		return NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单详情失败: %v", err))
+		return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单详情失败: %v", err))
+	}
+
+	// 增加租户的预占余额（在事务中，确保一致性）
+	// 使用原子操作 UPDATE ... SET pre_tax = pre_tax + ? 避免并发问题
+	if orderCtx.Tenant != nil {
+		// 使用原子操作增加预占余额
+		if err := tx.Model(&models.Tenant{}).
+			Where("id = ?", orderCtx.TenantID).
+			Update("pre_tax", gorm.Expr("pre_tax + ?", orderCtx.Money)).Error; err != nil {
+			tx.Rollback()
+			return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("增加预占余额失败: %v", err))
+		}
 	}
 
 	// 提交事务
 	if err := tx.Commit().Error; err != nil {
-		return NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("提交事务失败: %v", err))
+		return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("提交事务失败: %v", err))
 	}
 
-	// 创建订单日志（在事务外，避免影响主流程）
-	s.createOrderLog(ctx, orderCtx)
+	// 事务提交成功后，使缓存失效（异步执行，不阻塞主流程）
+	if orderCtx.Tenant != nil {
+		go s.invalidateTenantBalanceCache(context.Background(), orderCtx.TenantID)
+	}
 
-	return nil
+	// 异步创建订单日志（不阻塞主流程）
+	go s.createOrderLog(context.Background(), orderCtx)
+
+	return orderDetail.ID, nil
 }
 
 // createOrderLog 创建订单日志
@@ -814,47 +866,32 @@ func (s *OrderService) createOrderLog(ctx context.Context, orderCtx *OrderCreate
 	}
 
 	now := time.Now()
-	orderLog := &models.OrderLog{
-		OutOrderNo:     orderCtx.OutOrderNo,
-		SignRaw:        orderCtx.SignRaw,
-		Sign:           orderCtx.Sign,
-		RequestBody:    orderCtx.RequestBody,
-		RequestMethod:  orderCtx.RequestMethod,
-		CreateDatetime: &now,
-	}
 
-	// 使用 FirstOrCreate + Assign 实现 UpdateOrCreate
-	// 参考 Python: update_or_create_order_log(ctx.out_order_no, ctx.sign_raw, ctx.sign)
-	// 注意：Python 代码中只传入了三个参数，但数据库表有更多字段
-	// 这里使用 GORM 的 FirstOrCreate + Assign 实现完整的 UpdateOrCreate
+	// 优化：使用 MySQL 的 INSERT ... ON DUPLICATE KEY UPDATE 实现 UPSERT
+	// 减少一次查询，提高性能（out_order_no 有唯一索引）
 	// 如果记录已存在，更新字段（但不覆盖响应信息）；如果不存在，创建新记录
-	var existingLog models.OrderLog
-	if err := database.DB.Where("out_order_no = ?", orderCtx.OutOrderNo).First(&existingLog).Error; err != nil {
-		// 记录不存在，创建新记录
-		if err := database.DB.Create(orderLog).Error; err != nil {
-			logger.Logger.Warn("创建订单日志失败",
-				zap.String("out_order_no", orderCtx.OutOrderNo),
-				zap.Error(err))
-		}
-	} else {
-		// 记录已存在，更新请求相关字段（但不覆盖响应信息，如果已有响应信息）
-		updates := map[string]interface{}{
-			"sign_raw":       orderCtx.SignRaw,
-			"sign":           orderCtx.Sign,
-			"request_body":   orderCtx.RequestBody,
-			"request_method": orderCtx.RequestMethod,
-		}
-		// 如果还没有响应信息，更新 create_datetime
-		if existingLog.JSONResult == "" && existingLog.ResponseCode == "" {
-			updates["create_datetime"] = &now
-		}
-		if err := database.DB.Model(&models.OrderLog{}).
-			Where("out_order_no = ?", orderCtx.OutOrderNo).
-			Updates(updates).Error; err != nil {
-			logger.Logger.Warn("更新订单日志失败",
-				zap.String("out_order_no", orderCtx.OutOrderNo),
-				zap.Error(err))
-		}
+	// 使用原生 SQL 实现 UPSERT（MySQL 的 INSERT ... ON DUPLICATE KEY UPDATE）
+	// 如果已有响应信息，不更新 create_datetime
+	sql := `INSERT INTO dvadmin_order_log (out_order_no, sign_raw, sign, request_body, request_method, create_datetime)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				sign_raw = VALUES(sign_raw),
+				sign = VALUES(sign),
+				request_body = VALUES(request_body),
+				request_method = VALUES(request_method),
+				create_datetime = IF(json_result = '' AND response_code = '', VALUES(create_datetime), create_datetime)`
+
+	if err := database.DB.Exec(sql,
+		orderCtx.OutOrderNo,
+		orderCtx.SignRaw,
+		orderCtx.Sign,
+		orderCtx.RequestBody,
+		orderCtx.RequestMethod,
+		&now,
+	).Error; err != nil {
+		logger.Logger.Warn("创建/更新订单日志失败",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.Error(err))
 	}
 }
 
@@ -896,10 +933,15 @@ func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreate
 		return "", NewOrderError(ErrCodePluginUnavailable, fmt.Sprintf("插件不可用: %v", err))
 	}
 
-	// 获取订单详情ID（用于插件）
-	var orderDetail models.OrderDetail
-	if err := database.DB.Where("order_id = ?", orderCtx.OrderID).First(&orderDetail).Error; err != nil {
-		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("获取订单详情失败: %v", err))
+	// 使用已保存的订单详情ID，避免重复查询数据库
+	orderDetailID := orderCtx.OrderDetailID
+	if orderDetailID == 0 {
+		// 降级方案：如果订单详情ID未保存，则查询数据库
+		var orderDetail models.OrderDetail
+		if err := database.DB.Where("order_id = ?", orderCtx.OrderID).First(&orderDetail).Error; err != nil {
+			return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("获取订单详情失败: %v", err))
+		}
+		orderDetailID = orderDetail.ID
 	}
 
 	// 构建插件请求
@@ -908,7 +950,7 @@ func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreate
 		OutOrderNo:     orderCtx.OutOrderNo,
 		OrderNo:        orderCtx.OrderNo,
 		OrderID:        orderCtx.OrderID,
-		DetailID:       orderDetail.ID,
+		DetailID:       orderDetailID,
 		ProductID:      orderCtx.ProductID, // 使用已选择的产品ID
 		Money:          orderCtx.Money,
 		NotifyURL:      orderCtx.NotifyURL,
@@ -970,16 +1012,6 @@ func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreate
 		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单失败: %v", err))
 	}
 
-	// 记录插件响应到订单详情的 Extra 字段
-	// 参考 Python: 上游响应应该被记录，包括成功和失败的情况
-	if err := s.recordPluginResponseToOrderDetail(ctx, orderCtx.OrderID, createResp); err != nil {
-		logger.Logger.Warn("记录插件响应失败",
-			zap.String("out_order_no", orderCtx.OutOrderNo),
-			zap.String("order_no", orderCtx.OrderNo),
-			zap.Error(err))
-		// 记录失败不影响主流程，继续执行
-	}
-
 	// 检查响应
 	if !createResp.IsSuccess() {
 		// 记录插件返回的错误
@@ -988,7 +1020,24 @@ func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreate
 			zap.String("order_no", orderCtx.OrderNo),
 			zap.Int("error_code", createResp.ErrorCode),
 			zap.String("error_message", createResp.ErrorMessage))
+		// 即使失败也记录响应（用于调试）
+		if err := s.recordPluginResponseToOrderDetailByID(ctx, orderCtx.OrderDetailID, createResp); err != nil {
+			logger.Logger.Warn("记录插件响应失败",
+				zap.String("out_order_no", orderCtx.OutOrderNo),
+				zap.Error(err))
+		}
 		return "", NewOrderError(createResp.ErrorCode, createResp.ErrorMessage)
+	}
+
+	// 记录插件响应到订单详情的 Extra 字段（成功情况，已包含 pay_url）
+	// 参考 Python: 上游响应应该被记录，包括成功和失败的情况
+	// 注意：成功时已经包含 pay_url，后续 getAuthURL 中如果不需要鉴权就不需要再次更新
+	if err := s.recordPluginResponseToOrderDetailByID(ctx, orderCtx.OrderDetailID, createResp); err != nil {
+		logger.Logger.Warn("记录插件响应失败",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.String("order_no", orderCtx.OrderNo),
+			zap.Error(err))
+		// 记录失败不影响主流程，继续执行
 	}
 
 	return createResp.PayURL, nil
@@ -1001,11 +1050,14 @@ func (s *OrderService) getAuthURL(ctx context.Context, orderCtx *OrderCreateCont
 	// 检查域名是否需要鉴权
 	if orderCtx.Domain == nil || !orderCtx.Domain.AuthStatus || orderCtx.Domain.AuthKey == "" {
 		// 不需要鉴权，直接返回支付URL
+		// 注意：pay_url 已经在 recordPluginResponseToOrderDetailByID 中存储了，不需要再次存储
 		return payURL, nil
 	}
 
-	// 将支付URL存储到订单详情的 Extra 字段中（收银台需要获取）
-	if err := s.storePayURLToOrderDetail(ctx, orderCtx.OrderID, payURL); err != nil {
+	// 需要鉴权时，确保支付URL已存储到订单详情的 Extra 字段中（收银台需要获取）
+	// 注意：如果 recordPluginResponseToOrderDetailByID 已经存储了 pay_url，这里可以跳过
+	// 但为了确保数据一致性，仍然更新一次（使用合并更新，避免重复查询）
+	if err := s.ensurePayURLInOrderDetail(ctx, orderCtx.OrderDetailID, payURL); err != nil {
 		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("存储支付URL失败: %v", err))
 	}
 
@@ -1019,19 +1071,22 @@ func (s *OrderService) getAuthURL(ctx context.Context, orderCtx *OrderCreateCont
 	return cashierURL, nil
 }
 
-// recordPluginResponseToOrderDetail 记录插件响应到订单详情的 Extra 字段
+// recordPluginResponseToOrderDetailByID 记录插件响应到订单详情的 Extra 字段（使用订单详情ID，避免查询）
 // 参考 Python: 上游响应应该被记录，包括成功和失败的情况
-func (s *OrderService) recordPluginResponseToOrderDetail(ctx context.Context, orderID string, pluginResp *plugin.CreateOrderResponse) error {
-	// 获取订单详情
-	var orderDetail models.OrderDetail
-	if err := database.DB.Where("order_id = ?", orderID).First(&orderDetail).Error; err != nil {
+func (s *OrderService) recordPluginResponseToOrderDetailByID(ctx context.Context, orderDetailID int64, pluginResp *plugin.CreateOrderResponse) error {
+	// 获取订单详情的 Extra 字段（只查询需要的字段）
+	var extra string
+	if err := database.DB.Model(&models.OrderDetail{}).
+		Where("id = ?", orderDetailID).
+		Select("extra").
+		Scan(&extra).Error; err != nil {
 		return err
 	}
 
 	// 解析现有的 Extra 字段
 	extraMap := make(map[string]interface{})
-	if orderDetail.Extra != "" && orderDetail.Extra != "{}" {
-		if err := json.Unmarshal([]byte(orderDetail.Extra), &extraMap); err != nil {
+	if extra != "" && extra != "{}" {
+		if err := json.Unmarshal([]byte(extra), &extraMap); err != nil {
 			// 如果解析失败，创建新的 map
 			extraMap = make(map[string]interface{})
 		}
@@ -1070,30 +1125,50 @@ func (s *OrderService) recordPluginResponseToOrderDetail(ctx context.Context, or
 		return err
 	}
 
-	// 更新订单详情
-	return database.DB.Model(&orderDetail).Update("extra", string(extraJSON)).Error
+	// 更新订单详情（直接使用ID更新，避免查询）
+	return database.DB.Model(&models.OrderDetail{}).
+		Where("id = ?", orderDetailID).
+		Update("extra", string(extraJSON)).Error
 }
 
-// storePayURLToOrderDetail 将支付URL存储到订单详情的 Extra 字段中
-// 参考 Python: 存储支付URL以便收银台获取
-// 注意：这个方法主要用于向后兼容，实际应该使用 recordPluginResponseToOrderDetail
-func (s *OrderService) storePayURLToOrderDetail(ctx context.Context, orderID string, payURL string) error {
+// recordPluginResponseToOrderDetail 记录插件响应到订单详情的 Extra 字段（保留原方法作为降级方案）
+func (s *OrderService) recordPluginResponseToOrderDetail(ctx context.Context, orderID string, pluginResp *plugin.CreateOrderResponse) error {
 	// 获取订单详情
 	var orderDetail models.OrderDetail
 	if err := database.DB.Where("order_id = ?", orderID).First(&orderDetail).Error; err != nil {
 		return err
 	}
+	return s.recordPluginResponseToOrderDetailByID(ctx, orderDetail.ID, pluginResp)
+}
+
+// ensurePayURLInOrderDetail 确保支付URL已存储在订单详情的 Extra 字段中
+// 优化：如果 pay_url 已存在且相同，则跳过更新，减少数据库操作
+func (s *OrderService) ensurePayURLInOrderDetail(ctx context.Context, orderDetailID int64, payURL string) error {
+	// 获取订单详情的 Extra 字段（只查询需要的字段）
+	var extra string
+	if err := database.DB.Model(&models.OrderDetail{}).
+		Where("id = ?", orderDetailID).
+		Select("extra").
+		Scan(&extra).Error; err != nil {
+		return err
+	}
 
 	// 解析现有的 Extra 字段
 	extraMap := make(map[string]interface{})
-	if orderDetail.Extra != "" && orderDetail.Extra != "{}" {
-		if err := json.Unmarshal([]byte(orderDetail.Extra), &extraMap); err != nil {
+	if extra != "" && extra != "{}" {
+		if err := json.Unmarshal([]byte(extra), &extraMap); err != nil {
 			// 如果解析失败，创建新的 map
 			extraMap = make(map[string]interface{})
 		}
 	}
 
-	// 添加支付URL到 Extra
+	// 检查 pay_url 是否已存在且相同（避免不必要的更新）
+	if existingPayURL, ok := extraMap["pay_url"].(string); ok && existingPayURL == payURL {
+		// pay_url 已存在且相同，无需更新
+		return nil
+	}
+
+	// 添加或更新支付URL到 Extra
 	extraMap["pay_url"] = payURL
 
 	// 序列化并更新
@@ -1102,8 +1177,26 @@ func (s *OrderService) storePayURLToOrderDetail(ctx context.Context, orderID str
 		return err
 	}
 
-	// 更新订单详情
-	return database.DB.Model(&orderDetail).Update("extra", string(extraJSON)).Error
+	// 更新订单详情（直接使用ID更新，避免查询）
+	return database.DB.Model(&models.OrderDetail{}).
+		Where("id = ?", orderDetailID).
+		Update("extra", string(extraJSON)).Error
+}
+
+// storePayURLToOrderDetailByID 将支付URL存储到订单详情的 Extra 字段中（保留作为降级方案）
+// 参考 Python: 存储支付URL以便收银台获取
+func (s *OrderService) storePayURLToOrderDetailByID(ctx context.Context, orderDetailID int64, payURL string) error {
+	return s.ensurePayURLInOrderDetail(ctx, orderDetailID, payURL)
+}
+
+// storePayURLToOrderDetail 将支付URL存储到订单详情的 Extra 字段中（保留原方法作为降级方案）
+func (s *OrderService) storePayURLToOrderDetail(ctx context.Context, orderID string, payURL string) error {
+	// 获取订单详情
+	var orderDetail models.OrderDetail
+	if err := database.DB.Where("order_id = ?", orderID).First(&orderDetail).Error; err != nil {
+		return err
+	}
+	return s.storePayURLToOrderDetailByID(ctx, orderDetail.ID, payURL)
 }
 
 // generateAuthURLAndCashier 生成鉴权链接并返回收银台地址
@@ -1230,15 +1323,89 @@ func (s *OrderService) GetOrderByOutOrderNo(outOrderNo string, merchantID int64)
 	return &order, nil
 }
 
-// UpdateOrderStatus 更新订单状态
+// UpdateOrderStatus 更新订单状态，并处理预占余额和余额扣减
+// 使用事务确保一致性，并处理预占余额的释放和余额的扣减
+// 优化：从缓存获取商户信息（包含租户ID），避免在事务中查询数据库
 func (s *OrderService) UpdateOrderStatus(orderID string, status int, ticketNo string) error {
+	// 先查询订单信息（在事务外，减少事务时间）
+	var order models.Order
+	if err := database.DB.Select("id, merchant_id, money, order_status").
+		Where("id = ?", orderID).
+		First(&order).Error; err != nil {
+		return fmt.Errorf("订单不存在: %w", err)
+	}
+
+	// 检查订单状态是否已经变更（避免重复处理）
+	if order.OrderStatus == status {
+		return nil // 状态未变化，直接返回
+	}
+
+	// 从缓存获取商户信息（包含租户ID），避免在事务中查询数据库
+	var tenantID *int64
+	if order.MerchantID != nil {
+		merchant, _, err := s.cacheService.GetMerchantWithUser(context.Background(), *order.MerchantID)
+		if err == nil && merchant != nil && merchant.ParentID > 0 {
+			// ParentID 是 int64 类型，不是指针，直接使用
+			tenantID = &merchant.ParentID
+		}
+		// 如果缓存未命中，降级方案：在事务外查询（但这种情况应该很少）
+		if tenantID == nil {
+			// 降级方案：在事务外查询（这种情况应该很少，因为缓存刷新服务每秒更新）
+			var merchant models.Merchant
+			if err := database.DB.Select("parent_id").Where("id = ?", *order.MerchantID).First(&merchant).Error; err == nil && merchant.ParentID > 0 {
+				tenantID = &merchant.ParentID
+			}
+		}
+	}
+
+	// 开启事务（现在事务中只需要更新操作，不需要查询）
+	tx := database.DB.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
 	now := time.Now()
 
-	// 先更新版本号
-	if err := database.DB.Exec("UPDATE dvadmin_order SET ver = ver + 1 WHERE id = ?", orderID).Error; err != nil {
+	// 优化：先处理租户余额（如果需要），再更新订单状态，减少锁持有时间
+	// 处理预占余额和余额扣减（在事务中，确保一致性）
+	if tenantID != nil {
+		// 根据订单状态处理预占余额和余额
+		// 使用原子操作，避免先查询再更新（减少锁持有时间）
+		switch status {
+		case models.OrderStatusPaid:
+			// 订单支付成功：扣减余额并释放预占
+			// 使用原子操作，避免先查询再更新（减少锁持有时间）
+			if err := tx.Model(&models.Tenant{}).
+				Where("id = ?", *tenantID).
+				Updates(map[string]interface{}{
+					"balance": gorm.Expr("balance - ?", order.Money),
+					"pre_tax": gorm.Expr("pre_tax - ?", order.Money),
+				}).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("扣减余额失败: %w", err)
+			}
+		case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
+			// 订单失败/取消/过期：只释放预占，不扣减余额
+			// 使用原子操作，避免先查询再更新
+			if err := tx.Model(&models.Tenant{}).
+				Where("id = ?", *tenantID).
+				Update("pre_tax", gorm.Expr("pre_tax - ?", order.Money)).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("释放预占余额失败: %w", err)
+			}
+			// OrderStatusPending 不需要处理（创建订单时已增加预占）
+		}
+	}
+
+	// 先更新版本号（使用原子操作）
+	if err := tx.Exec("UPDATE dvadmin_order SET ver = ver + 1 WHERE id = ?", orderID).Error; err != nil {
+		tx.Rollback()
 		return fmt.Errorf("更新版本号失败: %w", err)
 	}
 
+	// 更新订单状态（合并多个字段更新，减少数据库往返）
 	updates := map[string]interface{}{
 		"order_status":    status,
 		"update_datetime": &now,
@@ -1248,19 +1415,43 @@ func (s *OrderService) UpdateOrderStatus(orderID string, status int, ticketNo st
 		updates["pay_datetime"] = &now
 	}
 
+	if err := tx.Model(&models.Order{}).
+		Where("id = ?", orderID).
+		Updates(updates).Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("更新订单状态失败: %w", err)
+	}
+
+	// 更新订单详情的 ticket_no（如果提供）
+	// 优化：与订单状态更新合并到同一个事务中，但分开执行以便于错误处理
 	if ticketNo != "" {
-		if err := database.DB.Model(&models.OrderDetail{}).
+		if err := tx.Model(&models.OrderDetail{}).
 			Where("order_id = ?", orderID).
 			Update("ticket_no", ticketNo).Error; err != nil {
+			tx.Rollback()
 			return fmt.Errorf("更新订单详情失败: %w", err)
 		}
 	}
 
-	if err := database.DB.Model(&models.Order{}).
-		Where("id = ?", orderID).
-		Updates(updates).Error; err != nil {
-		return fmt.Errorf("更新订单状态失败: %w", err)
+	// 提交事务
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("提交事务失败: %w", err)
+	}
+
+	// 事务提交成功后，使缓存失效（异步执行，不阻塞主流程）
+	if tenantID != nil {
+		go s.invalidateTenantBalanceCache(context.Background(), *tenantID)
 	}
 
 	return nil
+}
+
+// invalidateTenantBalanceCache 使租户余额缓存失效
+func (s *OrderService) invalidateTenantBalanceCache(ctx context.Context, tenantID int64) {
+	cacheKey := fmt.Sprintf("tenant_balance:%d", tenantID)
+	if err := s.redis.Del(ctx, cacheKey).Err(); err != nil {
+		logger.Logger.Warn("清除租户余额缓存失败",
+			zap.Int64("tenant_id", tenantID),
+			zap.Error(err))
+	}
 }
