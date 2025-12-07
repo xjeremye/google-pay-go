@@ -1,6 +1,7 @@
 package alipay
 
 import (
+	"crypto/md5"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -32,6 +33,8 @@ type Client struct {
 	AppPublicCert    string
 	AlipayPublicCert string
 	AlipayRootCert   string
+	AppCertSN        string // 应用证书 SN（证书模式）
+	AlipayRootCertSN string // 支付宝根证书 SN（证书模式）
 }
 
 // NewClient 创建支付宝客户端
@@ -183,6 +186,19 @@ func NewClient(product *models.AlipayProduct, notifyURL string, isOrder bool) (*
 		if appPublicCrt == "" || alipayPublicCrt == "" || alipayRootCrt == "" {
 			return nil, fmt.Errorf("证书模式下必须提供完整的证书配置（应用公钥证书、支付宝公钥证书、支付宝根证书）")
 		}
+
+		// 提取证书 SN
+		appCertSN, err := getCertSN(appPublicCrt)
+		if err != nil {
+			return nil, fmt.Errorf("提取应用证书SN失败: %w", err)
+		}
+		client.AppCertSN = appCertSN
+
+		alipayRootCertSN, err := getRootCertSN(alipayRootCrt)
+		if err != nil {
+			return nil, fmt.Errorf("提取支付宝根证书SN失败: %w", err)
+		}
+		client.AlipayRootCertSN = alipayRootCertSN
 	}
 
 	return client, nil
@@ -303,6 +319,64 @@ func formatKey(keyStr string, lineLen int) string {
 	return result.String()
 }
 
+// getCertSN 获取证书 SN
+// 参考 Python: DCAliPay.get_cert_sn
+// 算法：CN={},OU={},O={},C={} + serial_number 的 MD5
+func getCertSN(certString string) (string, error) {
+	// 解析证书
+	block, _ := pem.Decode([]byte(certString))
+	if block == nil {
+		return "", fmt.Errorf("无法解析证书")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("解析证书失败: %w", err)
+	}
+
+	// 构建证书 SN 字符串
+	// Python: name = 'CN={},OU={},O={},C={}'.format(certIssue.CN, certIssue.OU, certIssue.O, certIssue.C)
+	issuer := cert.Issuer
+	name := fmt.Sprintf("CN=%s,OU=%s,O=%s,C=%s",
+		issuer.CommonName,
+		strings.Join(issuer.OrganizationalUnit, ","),
+		strings.Join(issuer.Organization, ","),
+		strings.Join(issuer.Country, ","))
+
+	// 添加序列号
+	snString := name + cert.SerialNumber.String()
+
+	// 计算 MD5
+	hash := md5.Sum([]byte(snString))
+	return fmt.Sprintf("%x", hash), nil
+}
+
+// getRootCertSN 获取根证书 SN
+// 参考 Python: DCAliPay.get_root_cert_sn
+// 根证书可能包含多个证书，需要找到第一个有效的证书 SN
+func getRootCertSN(rootCertString string) (string, error) {
+	// 根证书可能包含多个证书，用两个换行符分隔
+	// Python: 根证书中，每个 cert 中间有两个回车间隔
+	certs := strings.Split(rootCertString, "\n\n")
+
+	for _, certStr := range certs {
+		if strings.TrimSpace(certStr) == "" {
+			continue
+		}
+
+		// 尝试解析每个证书
+		sn, err := getCertSN(certStr)
+		if err != nil {
+			continue
+		}
+
+		// 返回第一个有效的证书 SN
+		return sn, nil
+	}
+
+	return "", fmt.Errorf("无法从根证书中提取有效的证书 SN")
+}
+
 // TradeWapPay 手机网站支付
 // 参考 Python: alipay.api_alipay_trade_wap_pay
 func (c *Client) TradeWapPay(subject, outTradeNo, totalAmount, notifyURL string, others map[string]interface{}) (string, error) {
@@ -342,6 +416,12 @@ func (c *Client) TradeWapPay(subject, outTradeNo, totalAmount, notifyURL string,
 	// 如果有 app_auth_token，添加到参数中
 	if c.AppAuthToken != "" {
 		params["app_auth_token"] = c.AppAuthToken
+	}
+
+	// 证书模式下，添加证书 SN（必须在签名之前添加）
+	if c.IsDC {
+		params["app_cert_sn"] = c.AppCertSN
+		params["alipay_root_cert_sn"] = c.AlipayRootCertSN
 	}
 
 	// 生成签名
