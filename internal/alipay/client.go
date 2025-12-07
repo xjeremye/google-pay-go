@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,7 +15,9 @@ import (
 	"time"
 
 	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
+	"go.uber.org/zap"
 )
 
 // Client 支付宝客户端
@@ -35,6 +38,9 @@ type Client struct {
 	AlipayRootCert   string
 	AppCertSN        string // 应用证书 SN（证书模式）
 	AlipayRootCertSN string // 支付宝根证书 SN（证书模式）
+	// 用于记录 query_log 的订单信息
+	OrderNo    string // 系统订单号
+	OutOrderNo string // 外部订单号
 }
 
 // NewClient 创建支付宝客户端
@@ -433,6 +439,19 @@ func (c *Client) TradeWapPay(subject, outTradeNo, totalAmount, notifyURL string,
 	queryString := c.buildQueryString(params)
 	payURL := c.Gateway + "?" + queryString
 
+	// 记录 query_log（记录构建的支付宝 API 请求）
+	// 参考 Python: 记录支付宝 API 调用的请求参数
+	// 注意：这里只是构建请求，实际的 HTTP 请求在 GetRedirectURL 中发送
+	requestBodyJSON, _ := json.Marshal(params)
+	go c.createQueryLog(
+		payURL,
+		"GET", // 虽然实际请求在 GetRedirectURL 中，但这里记录构建的请求
+		string(requestBodyJSON),
+		"", // 响应码在 GetRedirectURL 中记录
+		"", // 响应结果在 GetRedirectURL 中记录
+		"支付宝API请求构建",
+	)
+
 	return payURL, nil
 }
 
@@ -449,17 +468,34 @@ func (c *Client) buildQueryString(params map[string]interface{}) string {
 
 // GetRedirectURL 获取重定向后的 URL
 // 参考 Python: 如果 redirects=True，发送 GET 请求获取 Location
+// 同时记录 query_log（支付宝 API 调用日志）
 func (c *Client) GetRedirectURL(payURL string) (string, error) {
 	req, err := http.NewRequest("GET", payURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %w", err)
 	}
 
+	// 记录请求信息（用于 query_log）
+	requestBody := "" // GET 请求没有 body
+	requestMethod := "GET"
+
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		// 请求失败，仍然记录 query_log
+		go c.createQueryLog(payURL, requestMethod, requestBody, "", fmt.Sprintf("请求失败: %v", err), "")
 		return "", fmt.Errorf("请求失败: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// 读取响应体
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		bodyBytes = []byte(fmt.Sprintf("读取响应失败: %v", err))
+	}
+	bodyStr := string(bodyBytes)
+
+	// 记录 query_log（异步执行，不阻塞主流程）
+	go c.createQueryLog(payURL, requestMethod, requestBody, fmt.Sprintf("%d", resp.StatusCode), bodyStr, "")
 
 	// 获取重定向 URL
 	location := resp.Header.Get("Location")
@@ -470,10 +506,6 @@ func (c *Client) GetRedirectURL(payURL string) (string, error) {
 	// 如果没有 Location 头，尝试从响应体中提取
 	// 参考 Python: re.findall(r'<div class="Todo">(.+)</div>', response.text)
 	if resp.StatusCode != 302 && resp.StatusCode != 301 {
-		body := make([]byte, 1024)
-		n, _ := resp.Body.Read(body)
-		bodyStr := string(body[:n])
-
 		// 尝试提取错误信息
 		re := regexp.MustCompile(`<div class="Todo">(.+?)</div>`)
 		matches := re.FindStringSubmatch(bodyStr)
@@ -485,4 +517,30 @@ func (c *Client) GetRedirectURL(payURL string) (string, error) {
 	}
 
 	return "", fmt.Errorf("无法获取重定向 URL")
+}
+
+// createQueryLog 创建查询日志（记录支付宝 API 调用）
+// 参考 Python: 记录支付宝 API 调用的请求和响应信息
+// 注意：query_log 只创建不更新，每次 API 调用都创建一条新记录
+func (c *Client) createQueryLog(url, requestMethod, requestBody, responseCode, jsonResult, remarks string) {
+	now := time.Now()
+	queryLog := &models.QueryLog{
+		OutOrderNo:     c.OutOrderNo,
+		OrderNo:        c.OrderNo,
+		URL:            url,
+		RequestBody:    requestBody,
+		RequestMethod:  requestMethod,
+		ResponseCode:   responseCode,
+		JSONResult:     jsonResult,
+		Remarks:        remarks,
+		CreateDatetime: &now,
+	}
+
+	if err := database.DB.Create(queryLog).Error; err != nil {
+		logger.Logger.Warn("创建查询日志失败",
+			zap.String("out_order_no", c.OutOrderNo),
+			zap.String("order_no", c.OrderNo),
+			zap.String("url", url),
+			zap.Error(err))
+	}
 }

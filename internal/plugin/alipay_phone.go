@@ -188,6 +188,10 @@ func (p *AlipayPhonePlugin) buildAlipayWapPayURL(req *CreateOrderRequest, domain
 		return "", fmt.Errorf("创建支付宝客户端失败: %w", err)
 	}
 
+	// 设置订单信息（用于记录 query_log）
+	alipayClient.OrderNo = req.OrderNo
+	alipayClient.OutOrderNo = req.OutOrderNo
+
 	// 格式化金额（分转元）
 	totalAmount := fmt.Sprintf("%.2f", float64(req.Money)/100)
 
