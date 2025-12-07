@@ -218,7 +218,7 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 	}
 
 	// 更新订单状态
-	if err := c.orderService.UpdateOrderStatus(order.ID, newStatus, notifyData.TradeNo); err != nil {
+	if err := c.orderService.UpdateOrderStatus(ctx, order.ID, newStatus, notifyData.TradeNo); err != nil {
 		logger.Logger.Error("更新订单状态失败",
 			zap.String("order_id", order.ID),
 			zap.Int("status", newStatus),

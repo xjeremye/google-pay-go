@@ -93,6 +93,7 @@ type OrderCreateContext struct {
 	// 关联对象
 	Merchant   *models.Merchant
 	Tenant     *models.Tenant
+	Writeoff   *models.Writeoff // 码商信息
 	Channel    *models.PayChannel
 	Plugin     *models.PayPlugin
 	PayType    *models.PayType
@@ -134,10 +135,11 @@ func (o *OrderCreateContext) SetDomainURL(url string) { o.DomainURL = url }
 
 // OrderService 订单服务（重构版）
 type OrderService struct {
-	cacheService  *CacheService
-	pluginService *PluginService
-	pluginManager *plugin.Manager
-	redis         *redis.Client
+	cacheService   *CacheService
+	pluginService  *PluginService
+	pluginManager  *plugin.Manager
+	balanceService *BalanceService
+	redis          *redis.Client
 }
 
 // NewOrderService 创建订单服务
@@ -149,10 +151,11 @@ func NewOrderService() *OrderService {
 	pluginMgr.SetInfoProvider(&pluginInfoProviderAdapter{service: pluginSvc})
 
 	return &OrderService{
-		cacheService:  NewCacheService(),
-		pluginService: pluginSvc,
-		pluginManager: pluginMgr,
-		redis:         database.RDB,
+		cacheService:   NewCacheService(),
+		pluginService:  pluginSvc,
+		pluginManager:  pluginMgr,
+		balanceService: NewBalanceService(),
+		redis:          database.RDB,
 	}
 }
 
@@ -260,6 +263,19 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 			zap.String("out_order_no", orderCtx.OutOrderNo),
 			zap.Int64("elapsed_ms", waitProductElapsed),
 			zap.Int64("total_elapsed_ms", time.Since(startTime).Milliseconds()))
+	}
+
+	// 获取码商信息（如果存在码商ID）
+	if orderCtx.WriteoffID != nil {
+		writeoff, _, err := s.cacheService.GetWriteoffWithUser(ctx, *orderCtx.WriteoffID)
+		if err != nil {
+			// 如果获取失败，记录日志但不阻止订单创建（容错处理）
+			logger.Logger.Warn("获取码商信息失败",
+				zap.Int64("writeoff_id", *orderCtx.WriteoffID),
+				zap.Error(err))
+		} else {
+			orderCtx.Writeoff = writeoff
+		}
 	}
 
 	// 5. 预检查余额（使用缓存，快速检查）
@@ -609,34 +625,51 @@ func (s *OrderService) getPluginPayDomain(ctx context.Context, pluginID, channel
 	return ""
 }
 
-// validateBalance 检查余额（使用缓存优化，预检查）
-// 参考 Python: 检查租户余额是否足够
-// 注意：这是预检查，最终检查在创建订单的事务中进行，使用数据库锁确保一致性
+// validateBalance 检查余额（预检查）
+// 参考 Python: 检查租户余额是否足够，然后检查码商余额
+// 注意：这是预检查，最终检查在创建订单时使用 Redis 原子操作确保一致性
 func (s *OrderService) validateBalance(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
-	if orderCtx.Tenant == nil {
-		return nil // 如果没有租户信息，跳过检查
-	}
+	// 1. 先判断租户余额
+	if orderCtx.Tenant != nil {
+		// 直接从租户信息中获取余额和信任标志
+		balance := orderCtx.Tenant.Balance
+		trust := orderCtx.Tenant.Trust
 
-	// 使用缓存的余额查询（1秒缓存，与缓存刷新服务同步）
-	// 缓存刷新服务每秒更新一次余额，确保数据相对新鲜
-	balance, preTax, trust, err := s.cacheService.GetTenantBalance(ctx, orderCtx.TenantID)
-	if err != nil {
-		// 如果查询失败，记录日志但不阻止订单创建（容错处理）
-		// 最终检查在事务中进行
-		return nil
-	}
-
-	// 计算可用余额：余额 - 预占用金额
-	availableBalance := balance - preTax
-
-	// 检查余额是否足够
-	if availableBalance < int64(orderCtx.Money) {
-		// 如果 trust=false（不允许负数），则拒绝订单
-		if !trust {
-			return ErrBalanceInsufficient
+		// 从 Redis 获取预占余额（全部依赖 Redis，默认 0）
+		preTax, err := s.balanceService.GetPreTax(ctx, orderCtx.TenantID)
+		if err != nil {
+			// 如果获取失败，记录日志但不阻止订单创建（容错处理）
+			logger.Logger.Warn("获取预占余额失败",
+				zap.Int64("tenant_id", orderCtx.TenantID),
+				zap.Error(err))
+			preTax = 0 // 默认使用 0
 		}
-		// 如果 trust=true（允许负数），允许继续
-		// 注意：最终检查在事务中进行，使用数据库锁确保一致性
+
+		// 计算可用余额：余额 - 预占用金额
+		availableBalance := balance - preTax
+
+		// 检查余额是否足够
+		if availableBalance < int64(orderCtx.Money) {
+			// 如果 trust=false（不允许负数），则拒绝订单
+			if !trust {
+				return ErrBalanceInsufficient
+			}
+			// 如果 trust=true（允许负数），允许继续
+			// 注意：最终检查在创建订单时使用 Redis 原子操作确保一致性
+		}
+	}
+
+	// 2. 再判断码商余额（如果存在码商ID）
+	if orderCtx.Writeoff != nil {
+		// 码商余额判断逻辑与租户相同
+		// 直接从码商信息中获取余额
+		if orderCtx.Writeoff.Balance != nil {
+			// 检查码商余额是否足够（码商没有预占余额的概念，直接检查余额）
+			if *orderCtx.Writeoff.Balance < int64(orderCtx.Money) {
+				return NewOrderError(ErrCodeBalanceInsufficient, "码商余额不足")
+			}
+		}
+		// 如果余额为 nil，表示无限制，允许继续
 	}
 
 	return nil
@@ -738,29 +771,37 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		}
 	}()
 
-	// 在事务中再次检查余额，确保一致性（使用数据库锁）
+	// 使用 Redis 原子操作预占余额（在事务外，避免数据库锁）
 	// 这是最终检查，确保余额足够才创建订单
+	// 1. 先判断租户余额
 	if orderCtx.Tenant != nil {
-		var tenant models.Tenant
-		// 使用 SELECT FOR UPDATE 锁定行，确保余额检查的一致性
-		if err := tx.Set("gorm:query_option", "FOR UPDATE").
-			Select("id, balance, pre_tax, trust").
-			Where("id = ?", orderCtx.TenantID).
-			First(&tenant).Error; err == nil {
-			// 计算可用余额：余额 - 预占用金额
-			availableBalance := tenant.Balance - int64(tenant.PreTax)
+		success, _, err := s.balanceService.ReserveBalance(ctx, orderCtx.TenantID, int64(orderCtx.Money))
+		if err != nil {
+			tx.Rollback()
+			return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("预占余额失败: %v", err))
+		}
+		if !success {
+			tx.Rollback()
+			return 0, ErrBalanceInsufficient
+		}
+	}
 
-			// 检查余额是否足够
-			if availableBalance < int64(orderCtx.Money) {
-				// 如果 trust=false（不允许负数），则拒绝订单
-				if !tenant.Trust {
-					tx.Rollback()
-					return 0, ErrBalanceInsufficient
+	// 2. 再判断码商余额（如果存在码商信息）
+	if orderCtx.Writeoff != nil {
+		// 码商余额判断逻辑与租户相同（检查余额是否足够）
+		// 码商没有预占余额的概念，直接检查余额
+		if orderCtx.Writeoff.Balance != nil {
+			// 检查码商余额是否足够
+			if *orderCtx.Writeoff.Balance < int64(orderCtx.Money) {
+				tx.Rollback()
+				// 如果租户余额已预占，需要释放
+				if orderCtx.Tenant != nil {
+					_ = s.balanceService.ReleasePreTax(ctx, orderCtx.TenantID, int64(orderCtx.Money))
 				}
-				// 如果 trust=true（允许负数），允许继续
+				return 0, NewOrderError(ErrCodeBalanceInsufficient, "码商余额不足")
 			}
 		}
-		// 如果查询失败，记录日志但不阻止订单创建（容错处理）
+		// 如果余额为 nil，表示无限制，允许继续
 	}
 
 	// 构建通道名称（格式：[通道ID]通道名称）
@@ -827,27 +868,18 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单详情失败: %v", err))
 	}
 
-	// 增加租户的预占余额（在事务中，确保一致性）
-	// 使用原子操作 UPDATE ... SET pre_tax = pre_tax + ? 避免并发问题
-	if orderCtx.Tenant != nil {
-		// 使用原子操作增加预占余额
-		if err := tx.Model(&models.Tenant{}).
-			Where("id = ?", orderCtx.TenantID).
-			Update("pre_tax", gorm.Expr("pre_tax + ?", orderCtx.Money)).Error; err != nil {
-			tx.Rollback()
-			return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("增加预占余额失败: %v", err))
-		}
-	}
+	// 注意：预占余额已在事务外通过 Redis 原子操作完成，这里不再需要数据库操作
 
 	// 提交事务
 	if err := tx.Commit().Error; err != nil {
+		// 如果事务提交失败，需要回滚 Redis 中的预占余额
+		if orderCtx.Tenant != nil {
+			_ = s.balanceService.ReleasePreTax(ctx, orderCtx.TenantID, int64(orderCtx.Money))
+		}
 		return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("提交事务失败: %v", err))
 	}
 
-	// 事务提交成功后，使缓存失效（异步执行，不阻塞主流程）
-	if orderCtx.Tenant != nil {
-		go s.invalidateTenantBalanceCache(context.Background(), orderCtx.TenantID)
-	}
+	// 注意：余额和预占余额已完全由 Redis 管理，不需要使缓存失效
 
 	// 注意：订单日志由 Controller 层创建（包含响应信息）
 	// 这里不再创建，避免重复
@@ -1315,7 +1347,7 @@ func (s *OrderService) GetOrderByOutOrderNo(outOrderNo string, merchantID int64)
 // UpdateOrderStatus 更新订单状态，并处理预占余额和余额扣减
 // 使用事务确保一致性，并处理预占余额的释放和余额的扣减
 // 优化：从缓存获取商户信息（包含租户ID），避免在事务中查询数据库
-func (s *OrderService) UpdateOrderStatus(orderID string, status int, ticketNo string) error {
+func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, status int, ticketNo string) error {
 	// 先查询订单信息（在事务外，减少事务时间）
 	var order models.Order
 	if err := database.DB.Select("id, merchant_id, money, order_status").
@@ -1357,30 +1389,30 @@ func (s *OrderService) UpdateOrderStatus(orderID string, status int, ticketNo st
 
 	now := time.Now()
 
-	// 优化：先处理租户余额（如果需要），再更新订单状态，减少锁持有时间
-	// 处理预占余额和余额扣减（在事务中，确保一致性）
+	// 处理租户余额（在事务中，确保一致性）
 	if tenantID != nil {
 		// 根据订单状态处理预占余额和余额
-		// 使用原子操作，避免先查询再更新（减少锁持有时间）
 		switch status {
 		case models.OrderStatusPaid:
-			// 订单支付成功：扣减余额并释放预占
+			// 订单支付成功：从数据库扣减余额，从 Redis 释放预占
 			// 使用原子操作，避免先查询再更新（减少锁持有时间）
 			if err := tx.Model(&models.Tenant{}).
 				Where("id = ?", *tenantID).
-				Updates(map[string]interface{}{
-					"balance": gorm.Expr("balance - ?", order.Money),
-					"pre_tax": gorm.Expr("pre_tax - ?", order.Money),
-				}).Error; err != nil {
+				Update("balance", gorm.Expr("balance - ?", order.Money)).Error; err != nil {
 				tx.Rollback()
 				return fmt.Errorf("扣减余额失败: %w", err)
 			}
+			// 从 Redis 释放预占余额
+			if err := s.balanceService.ReleasePreTax(ctx, *tenantID, int64(order.Money)); err != nil {
+				// 如果 Redis 释放失败，记录日志但不回滚数据库事务（数据库已扣减）
+				logger.Logger.Warn("释放预占余额失败",
+					zap.Int64("tenant_id", *tenantID),
+					zap.Int64("amount", int64(order.Money)),
+					zap.Error(err))
+			}
 		case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
-			// 订单失败/取消/过期：只释放预占，不扣减余额
-			// 使用原子操作，避免先查询再更新
-			if err := tx.Model(&models.Tenant{}).
-				Where("id = ?", *tenantID).
-				Update("pre_tax", gorm.Expr("pre_tax - ?", order.Money)).Error; err != nil {
+			// 订单失败/取消/过期：只从 Redis 释放预占，不扣减余额
+			if err := s.balanceService.ReleasePreTax(ctx, *tenantID, int64(order.Money)); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("释放预占余额失败: %w", err)
 			}
@@ -1424,23 +1456,22 @@ func (s *OrderService) UpdateOrderStatus(orderID string, status int, ticketNo st
 
 	// 提交事务
 	if err := tx.Commit().Error; err != nil {
+		// 如果事务提交失败，需要回滚 Redis 中的预占余额操作
+		if tenantID != nil {
+			switch status {
+			case models.OrderStatusPaid:
+				// 回滚：重新预占（因为已经释放了）
+				// 注意：数据库余额扣减已回滚（事务回滚），只需要恢复 Redis 预占
+				_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
+			case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
+				// 回滚：重新预占（因为已经释放了）
+				_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
+			}
+		}
 		return fmt.Errorf("提交事务失败: %w", err)
 	}
 
-	// 事务提交成功后，使缓存失效（异步执行，不阻塞主流程）
-	if tenantID != nil {
-		go s.invalidateTenantBalanceCache(context.Background(), *tenantID)
-	}
+	// 注意：余额从数据库扣减，预占余额由 Redis 管理，缓存刷新服务会定期从数据库同步余额到 Redis
 
 	return nil
-}
-
-// invalidateTenantBalanceCache 使租户余额缓存失效
-func (s *OrderService) invalidateTenantBalanceCache(ctx context.Context, tenantID int64) {
-	cacheKey := fmt.Sprintf("tenant_balance:%d", tenantID)
-	if err := s.redis.Del(ctx, cacheKey).Err(); err != nil {
-		logger.Logger.Warn("清除租户余额缓存失败",
-			zap.Int64("tenant_id", tenantID),
-			zap.Error(err))
-	}
 }

@@ -224,46 +224,45 @@ func (s *CacheService) GetAvailableDomains(ctx context.Context, upstream int) ([
 	return domains, nil
 }
 
-// GetTenantBalance 获取租户余额（带短期缓存，与缓存刷新服务同步）
-// 缓存刷新服务每秒更新一次余额，这里使用1秒缓存确保一致性
-func (s *CacheService) GetTenantBalance(ctx context.Context, tenantID int64) (balance int64, preTax int64, trust bool, err error) {
-	cacheKey := fmt.Sprintf("tenant_balance:%d", tenantID)
+// GetWriteoffWithUser 获取码商及其用户信息（带缓存）
+func (s *CacheService) GetWriteoffWithUser(ctx context.Context, writeoffID int64) (*models.Writeoff, *SystemUser, error) {
+	cacheKey := fmt.Sprintf("writeoff:%d", writeoffID)
 
-	// 尝试从缓存获取（1秒过期，与缓存刷新服务同步）
+	// 尝试从缓存获取
 	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
-		var balanceData struct {
-			Balance int64 `json:"balance"`
-			PreTax  int64 `json:"pre_tax"`
-			Trust   bool  `json:"trust"`
+		var writeoff models.Writeoff
+		if err := json.Unmarshal([]byte(val), &writeoff); err == nil {
+			// 获取用户信息
+			if writeoff.SystemUserID != nil {
+				user, err := s.GetUser(ctx, *writeoff.SystemUserID)
+				if err == nil {
+					return &writeoff, user, nil
+				}
+			}
 		}
-		if err := json.Unmarshal([]byte(val), &balanceData); err == nil {
-			return balanceData.Balance, balanceData.PreTax, balanceData.Trust, nil
+	}
+
+	// 从数据库获取
+	var writeoff models.Writeoff
+	if err := database.DB.First(&writeoff, writeoffID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil, fmt.Errorf("码商不存在")
 		}
+		return nil, nil, err
 	}
 
-	// 从数据库获取（降级方案：如果缓存未命中）
-	var tenant models.Tenant
-	if err := database.DB.Select("id, balance, pre_tax, trust").
-		Where("id = ?", tenantID).
-		First(&tenant).Error; err != nil {
-		return 0, 0, false, err
+	// 缓存码商信息
+	if data, err := json.Marshal(writeoff); err == nil {
+		s.redis.Set(ctx, cacheKey, data, 24*time.Hour)
 	}
 
-	// 缓存余额信息（1秒过期，与缓存刷新服务同步）
-	balanceData := struct {
-		Balance int64 `json:"balance"`
-		PreTax  int64 `json:"pre_tax"`
-		Trust   bool  `json:"trust"`
-	}{
-		Balance: tenant.Balance,
-		PreTax:  int64(tenant.PreTax),
-		Trust:   tenant.Trust,
-	}
-	if data, err := json.Marshal(balanceData); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 1*time.Second)
+	// 获取用户信息
+	var user *SystemUser
+	if writeoff.SystemUserID != nil {
+		user, _ = s.GetUser(ctx, *writeoff.SystemUserID)
 	}
 
-	return tenant.Balance, int64(tenant.PreTax), tenant.Trust, nil
+	return &writeoff, user, nil
 }
 
 // SystemUser 系统用户模型（用于查询）

@@ -91,6 +91,9 @@ func (s *CacheRefreshService) refreshAllIncremental(ctx context.Context, fullRef
 	// 刷新租户缓存
 	s.refreshTenantsIncremental(ctx, refreshSince)
 
+	// 刷新码商缓存
+	s.refreshWriteoffsIncremental(ctx, refreshSince)
+
 	// 刷新支付渠道缓存（关键数据，必须刷新）
 	s.refreshPayChannelsIncremental(ctx, refreshSince)
 
@@ -105,6 +108,9 @@ func (s *CacheRefreshService) refreshAllIncremental(ctx context.Context, fullRef
 
 	// 刷新租户余额缓存（关键数据，必须每秒更新以确保一致性）
 	s.refreshTenantBalancesIncremental(ctx, refreshSince)
+
+	// 刷新码商余额缓存（关键数据，必须每秒更新以确保一致性）
+	s.refreshWriteoffBalancesIncremental(ctx, refreshSince)
 
 	// 更新最后刷新时间
 	s.lastRefreshTime = now.Add(-500 * time.Millisecond) // 留500ms缓冲，避免遗漏
@@ -779,41 +785,114 @@ func (s *CacheRefreshService) setTableUpdateTime(ctx context.Context, tableKey s
 }
 
 // refreshTenantBalancesIncremental 增量刷新租户余额缓存（关键数据，必须每秒更新）
-// 余额是实时变化的，需要频繁刷新以确保一致性
+// 从数据库同步余额和信任标志到 Redis（只读同步，不反向同步）
+// 预占余额由 Redis 管理，余额扣减在数据库中进行
 func (s *CacheRefreshService) refreshTenantBalancesIncremental(ctx context.Context, since time.Time) {
-	// 余额数据变化频繁，每次刷新都查询所有租户的余额
-	// 使用 SELECT FOR UPDATE 或直接查询最新数据
+	// 查询所有租户的余额和信任标志
 	var tenants []struct {
 		ID      int64 `gorm:"column:id"`
 		Balance int64 `gorm:"column:balance"`
-		PreTax  int64 `gorm:"column:pre_tax"`
 		Trust   bool  `gorm:"column:trust"`
 	}
 
-	// 查询所有租户的余额信息（只查询必要字段，减少数据库压力）
+	// 查询所有租户的余额和信任标志
 	if err := s.dbNoLog.Table("dvadmin_tenant").
-		Select("id, balance, pre_tax, trust").
+		Select("id, balance, trust").
 		Find(&tenants).Error; err != nil {
 		return
 	}
 
-	// 更新所有租户的余额缓存（1秒过期，与刷新频率同步）
+	// 更新所有租户的余额和信任标志到 Redis
 	for _, tenant := range tenants {
-		cacheKey := fmt.Sprintf("tenant_balance:%d", tenant.ID)
+		// 同步余额
+		balanceKey := fmt.Sprintf("tenant:balance:%d", tenant.ID)
+		_ = s.redis.Set(ctx, balanceKey, tenant.Balance, 0).Err()
 
-		balanceData := struct {
-			Balance int64 `json:"balance"`
-			PreTax  int64 `json:"pre_tax"`
-			Trust   bool  `json:"trust"`
-		}{
-			Balance: tenant.Balance,
-			PreTax:  tenant.PreTax,
-			Trust:   tenant.Trust,
+		// 同步信任标志
+		trustKey := fmt.Sprintf("tenant:trust:%d", tenant.ID)
+		val := "0"
+		if tenant.Trust {
+			val = "1"
 		}
+		_ = s.redis.Set(ctx, trustKey, val, 0).Err()
+	}
+}
 
-		if data, err := json.Marshal(balanceData); err == nil {
-			// 缓存1秒过期，与刷新频率同步
-			_ = s.redis.Set(ctx, cacheKey, data, 1*time.Second).Err()
+// refreshWriteoffsIncremental 增量刷新码商缓存
+func (s *CacheRefreshService) refreshWriteoffsIncremental(ctx context.Context, since time.Time) {
+	tableKey := "table:dvadmin_writeoff"
+
+	// 获取表的最后更新时间
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+
+	// 如果表没有更新，跳过
+	if !since.IsZero() && !tableLastUpdate.IsZero() && !tableLastUpdate.After(since) {
+		return
+	}
+
+	// 查询表的实际最后更新时间（从数据库获取）
+	var maxUpdateTime time.Time
+	s.dbNoLog.Model(&models.Writeoff{}).
+		Select("MAX(update_datetime) as max_time").
+		Scan(&maxUpdateTime)
+
+	// 如果表没有更新，跳过
+	if !since.IsZero() && !maxUpdateTime.IsZero() && !maxUpdateTime.After(since) {
+		return
+	}
+
+	var writeoffs []models.Writeoff
+	query := s.dbNoLog.Model(&models.Writeoff{})
+
+	if !since.IsZero() {
+		query = query.Where("update_datetime > ? OR update_datetime IS NULL", since)
+	}
+
+	if err := query.Find(&writeoffs).Error; err != nil {
+		return
+	}
+
+	// 更新所有码商的缓存
+	for _, writeoff := range writeoffs {
+		cacheKey := fmt.Sprintf("writeoff:%d", writeoff.ID)
+
+		if data, err := json.Marshal(writeoff); err == nil {
+			_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+		}
+	}
+
+	// 更新表的最后更新时间
+	if !maxUpdateTime.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	}
+}
+
+// refreshWriteoffBalancesIncremental 增量刷新码商余额缓存（关键数据，必须每秒更新）
+// 从数据库同步余额到 Redis（只读同步，不反向同步）
+func (s *CacheRefreshService) refreshWriteoffBalancesIncremental(ctx context.Context, since time.Time) {
+	// 查询所有码商的余额信息
+	var writeoffs []struct {
+		ID      int64  `gorm:"column:id"`
+		Balance *int64 `gorm:"column:balance"`
+	}
+
+	// 查询所有码商的余额信息（只查询必要字段，减少数据库压力）
+	if err := s.dbNoLog.Table("dvadmin_writeoff").
+		Select("id, balance").
+		Find(&writeoffs).Error; err != nil {
+		return
+	}
+
+	// 更新所有码商的余额到 Redis
+	for _, writeoff := range writeoffs {
+		balanceKey := fmt.Sprintf("writeoff:balance:%d", writeoff.ID)
+
+		// 从数据库同步余额到 Redis
+		if writeoff.Balance == nil {
+			// 如果数据库中是 NULL，在 Redis 中存储 "NULL" 作为标记
+			_ = s.redis.Set(ctx, balanceKey, "NULL", 0).Err()
+		} else {
+			_ = s.redis.Set(ctx, balanceKey, *writeoff.Balance, 0).Err()
 		}
 	}
 }
