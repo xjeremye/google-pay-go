@@ -79,6 +79,8 @@ type OrderCreateContext struct {
 	Tax            int
 	SignKey        string
 	WriteoffID     *int64 // 核销ID（可能从插件获取）
+	ProductID      string // 产品ID（从插件获取）
+	CookieID       string // Cookie ID（从插件获取）
 	SignRaw        string // 签名原始数据
 	Sign           string // 签名数据
 
@@ -214,15 +216,22 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 		return nil, err
 	}
 
-	// 4. 创建订单和详情
+	// 4. 等待产品（通过 product selector 选择产品）
+	// 参考 Python: ctx.responder.wait_product(ctx)
+	// 这一步必须在创建订单之前，因为需要先获取产品ID、核销ID等信息
+	if err := s.waitProduct(ctx, orderCtx); err != nil {
+		return nil, err
+	}
+
+	// 5. 创建订单和详情（此时已经有产品ID、核销ID等信息）
 	if err := s.createOrderAndDetail(ctx, orderCtx); err != nil {
 		return nil, err
 	}
 
-	// 5. 检查余额（简化版，实际需要查询租户余额表）
+	// 6. 检查余额（简化版，实际需要查询租户余额表）
 	// TODO: 实现余额检查
 
-	// 6. 生成支付URL（使用插件系统）
+	// 7. 生成支付URL（使用插件系统，此时产品已选择）
 	payURL, err := s.generatePayURL(ctx, orderCtx)
 	if err != nil {
 		return nil, err
@@ -566,6 +575,8 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		PluginID:       &orderCtx.PluginID,
 		DomainID:       orderCtx.DomainID,
 		WriteoffID:     orderCtx.WriteoffID,
+		ProductID:      orderCtx.ProductID,
+		CookieID:       orderCtx.CookieID,
 	}
 
 	if err := tx.Create(orderDetail).Error; err != nil {
@@ -606,6 +617,7 @@ func (s *OrderService) createOrderLog(ctx context.Context, orderCtx *OrderCreate
 }
 
 // generatePayURL 生成支付URL（使用插件系统）
+// 此时产品已经通过 waitProduct 选择好了，直接使用 orderCtx 中的产品信息
 func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreateContext) (string, *OrderError) {
 	// 获取插件实例
 	pluginInstance, err := s.pluginManager.GetPluginByCtx(ctx, orderCtx)
@@ -613,10 +625,20 @@ func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreate
 		return "", NewOrderError(ErrCodePluginUnavailable, fmt.Sprintf("插件不可用: %v", err))
 	}
 
+	// 获取订单详情ID（用于插件）
+	var orderDetail models.OrderDetail
+	if err := database.DB.Where("order_id = ?", orderCtx.OrderID).First(&orderDetail).Error; err != nil {
+		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("获取订单详情失败: %v", err))
+	}
+
 	// 构建插件请求
+	// 产品ID已经从 waitProduct 中选择好了，存储在 orderCtx.ProductID 中
 	createReq := &plugin.CreateOrderRequest{
 		OutOrderNo:     orderCtx.OutOrderNo,
 		OrderNo:        orderCtx.OrderNo,
+		OrderID:        orderCtx.OrderID,
+		DetailID:       orderDetail.ID,
+		ProductID:      orderCtx.ProductID, // 使用已选择的产品ID
 		Money:          orderCtx.Money,
 		NotifyURL:      orderCtx.NotifyURL,
 		JumpURL:        orderCtx.JumpURL,

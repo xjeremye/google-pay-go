@@ -28,6 +28,7 @@ import (
 	"github.com/golang-pay-core/config"
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
+	"github.com/golang-pay-core/internal/plugin"
 	"github.com/golang-pay-core/internal/router"
 	"github.com/golang-pay-core/internal/service"
 	"go.uber.org/zap"
@@ -78,6 +79,10 @@ func main() {
 		// Redis 不是必须的，可以继续运行
 	}
 	defer database.CloseRedis()
+
+	// 注册插件
+	plugin.RegisterAlipayPhonePlugin()
+	logger.Logger.Info("插件注册完成")
 
 	// 启动缓存刷新服务（每秒刷新一次热点数据）
 	cacheRefreshService := service.NewCacheRefreshService()

@@ -55,3 +55,31 @@ func (p *BasePlugin) GetTimeout(ctx context.Context, pluginID int64) int {
 	// 默认5分钟
 	return 300
 }
+
+// WaitProduct 等待产品（基础实现）
+// 参考 Python: BasePluginResponder.wait_product
+// 通用实现：获取支付宝产品（适用于继承 BasePlugin 的支付宝插件）
+// 如果插件需要自定义逻辑，可以覆盖此方法
+func (p *BasePlugin) WaitProduct(ctx context.Context, req *WaitProductRequest) (*WaitProductResponse, error) {
+	// 获取可用的核销ID列表
+	writeoffIDs, err := getWriteoffIDsForPlugin(req.TenantID, req.Money, &req.ChannelID)
+	if err != nil {
+		return NewWaitProductErrorResponse(7318, fmt.Sprintf("获取核销ID失败: %v", err)), nil
+	}
+	if len(writeoffIDs) == 0 {
+		return NewWaitProductErrorResponse(7318, "没有可选核销"), nil
+	}
+
+	// 获取产品（通用实现：支付宝产品）
+	productID, writeoffID, money, err := getAlipayProduct(ctx, req, writeoffIDs)
+	if err != nil {
+		return NewWaitProductErrorResponse(7318, fmt.Sprintf("获取产品失败: %v", err)), nil
+	}
+	if productID == "" {
+		return NewWaitProductErrorResponse(7318, "无货物库存"), nil
+	}
+	if writeoffID == nil {
+		return NewWaitProductErrorResponse(7318, "无核销库存"), nil
+	}
+	return NewWaitProductSuccessResponse(productID, writeoffID, "", money), nil
+}

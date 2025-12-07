@@ -32,6 +32,9 @@ type OrderContext interface {
 type Plugin interface {
 	// CreateOrder 创建订单，返回支付URL
 	CreateOrder(ctx context.Context, req *CreateOrderRequest) (*CreateOrderResponse, error)
+	// WaitProduct 等待产品（获取产品ID、核销ID、CookieID等）
+	// 参考 Python: BasePluginResponder.wait_product
+	WaitProduct(ctx context.Context, req *WaitProductRequest) (*WaitProductResponse, error)
 }
 
 // PluginCapabilities 插件能力接口（可选实现）
@@ -52,6 +55,9 @@ type PluginCapabilities interface {
 type CreateOrderRequest struct {
 	OutOrderNo     string                 `json:"out_order_no"`
 	OrderNo        string                 `json:"order_no"`
+	OrderID        string                 `json:"order_id"`        // 订单ID（主键）
+	DetailID       int64                  `json:"detail_id"`       // 订单详情ID
+	ProductID      string                 `json:"product_id"`      // 产品ID
 	Money          int                    `json:"money"`
 	NotifyURL      string                 `json:"notify_url"`
 	JumpURL        string                 `json:"jump_url"`
@@ -97,6 +103,51 @@ func NewSuccessResponse(payURL string) *CreateOrderResponse {
 // NewErrorResponse 创建错误响应
 func NewErrorResponse(code int, message string) *CreateOrderResponse {
 	return &CreateOrderResponse{
+		Success:      false,
+		ErrorCode:    code,
+		ErrorMessage: message,
+	}
+}
+
+// WaitProductRequest 等待产品请求
+type WaitProductRequest struct {
+	OutOrderNo     string                 `json:"out_order_no"`
+	Money          int                    `json:"money"`
+	NotifyMoney    int                    `json:"notify_money"`
+	MerchantID     int64                  `json:"merchant_id"`
+	TenantID       int64                  `json:"tenant_id"`
+	ChannelID      int64                  `json:"channel_id"`
+	PluginID       int64                  `json:"plugin_id"`
+	PluginType     string                 `json:"plugin_type"`
+	PluginUpstream int                    `json:"plugin_upstream"`
+	Channel        map[string]interface{} `json:"channel,omitempty"`
+}
+
+// WaitProductResponse 等待产品响应
+type WaitProductResponse struct {
+	ProductID  string  `json:"product_id"`  // 产品ID
+	WriteoffID *int64  `json:"writeoff_id"` // 核销ID
+	CookieID   string  `json:"cookie_id"`    // Cookie ID
+	Money      int     `json:"money"`        // 金额（可能被调整）
+	Success    bool    `json:"success"`
+	ErrorCode  int     `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+// NewWaitProductSuccessResponse 创建成功响应
+func NewWaitProductSuccessResponse(productID string, writeoffID *int64, cookieID string, money int) *WaitProductResponse {
+	return &WaitProductResponse{
+		ProductID:  productID,
+		WriteoffID: writeoffID,
+		CookieID:   cookieID,
+		Money:      money,
+		Success:    true,
+	}
+}
+
+// NewWaitProductErrorResponse 创建错误响应
+func NewWaitProductErrorResponse(code int, message string) *WaitProductResponse {
+	return &WaitProductResponse{
 		Success:      false,
 		ErrorCode:    code,
 		ErrorMessage: message,
