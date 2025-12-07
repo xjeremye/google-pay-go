@@ -1395,13 +1395,41 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, st
 		switch status {
 		case models.OrderStatusPaid:
 			// 订单支付成功：从数据库扣减余额，从 Redis 释放预占
-			// 使用原子操作，避免先查询再更新（减少锁持有时间）
+			// 先查询变更前的余额（使用 SELECT FOR UPDATE 确保一致性），用于记录流水
+			var tenant models.Tenant
+			if err := tx.Set("gorm:query_option", "FOR UPDATE").
+				Where("id = ?", *tenantID).First(&tenant).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("查询租户余额失败: %w", err)
+			}
+
+			oldBalance := tenant.Balance
+			newBalance := oldBalance - int64(order.Money)
+
+			// 使用原子操作扣减余额
 			if err := tx.Model(&models.Tenant{}).
 				Where("id = ?", *tenantID).
 				Update("balance", gorm.Expr("balance - ?", order.Money)).Error; err != nil {
 				tx.Rollback()
-				return fmt.Errorf("扣减余额失败: %w", err)
+				return fmt.Errorf("扣减租户余额失败: %w", err)
 			}
+
+			// 记录租户资金流水
+			cashflow := &models.TenantCashflow{
+				OldMoney:       oldBalance,
+				NewMoney:       newBalance,
+				ChangeMoney:    -int64(order.Money), // 负数表示扣减
+				FlowType:       models.CashflowTypeOrderDeduct,
+				OrderID:        &orderID,
+				PayChannelID:   order.PayChannelID,
+				TenantID:       *tenantID,
+				CreateDatetime: &now,
+			}
+			if err := tx.Create(cashflow).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("记录租户资金流水失败: %w", err)
+			}
+
 			// 从 Redis 释放预占余额
 			if err := s.balanceService.ReleasePreTax(ctx, *tenantID, int64(order.Money)); err != nil {
 				// 如果 Redis 释放失败，记录日志但不回滚数据库事务（数据库已扣减）
@@ -1417,6 +1445,63 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, st
 				return fmt.Errorf("释放预占余额失败: %w", err)
 			}
 			// OrderStatusPending 不需要处理（创建订单时已增加预占）
+		}
+	}
+
+	// 处理码商余额（在事务中，确保一致性）
+	// 码商余额扣减逻辑与租户相同：订单支付成功时从数据库扣减余额
+	if order.WriteoffID != nil {
+		switch status {
+		case models.OrderStatusPaid:
+			// 订单支付成功：从数据库扣减码商余额
+			// 先查询变更前的余额（使用 SELECT FOR UPDATE 确保一致性），用于记录流水
+			var writeoff models.Writeoff
+			if err := tx.Set("gorm:query_option", "FOR UPDATE").
+				Where("id = ?", *order.WriteoffID).First(&writeoff).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("查询码商余额失败: %w", err)
+			}
+
+			// 记录码商资金流水（无论余额是否为 NULL，都需要记录流水以便追踪）
+			var oldBalance, newBalance int64
+			if writeoff.Balance != nil {
+				// 有余额限制：扣减余额并记录实际余额变化
+				oldBalance = *writeoff.Balance
+				newBalance = oldBalance - int64(order.Money)
+
+				// 使用原子操作扣减余额
+				if err := tx.Model(&models.Writeoff{}).
+					Where("id = ? AND balance IS NOT NULL", *order.WriteoffID).
+					Update("balance", gorm.Expr("balance - ?", order.Money)).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("扣减码商余额失败: %w", err)
+				}
+			} else {
+				// 余额无限制：old_money 和 new_money 都设置为 0（表示无限制）
+				// 这样仍然可以记录流水以便追踪订单使用了哪些码商
+				oldBalance = 0
+				newBalance = 0
+			}
+
+			// 记录码商资金流水
+			cashflow := &models.WriteoffCashflow{
+				OldMoney:       oldBalance,
+				NewMoney:       newBalance,
+				ChangeMoney:    -int64(order.Money), // 负数表示扣减
+				FlowType:       models.CashflowTypeOrderDeduct,
+				Tax:            0.00, // 费率，可以根据需要设置
+				OrderID:        &orderID,
+				PayChannelID:   order.PayChannelID,
+				WriteoffID:     *order.WriteoffID,
+				CreateDatetime: &now,
+			}
+			if err := tx.Create(cashflow).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("记录码商资金流水失败: %w", err)
+			}
+		case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
+			// 订单失败/取消/过期：码商余额不需要处理（码商没有预占余额的概念）
+			// 码商余额只在支付成功时扣减
 		}
 	}
 

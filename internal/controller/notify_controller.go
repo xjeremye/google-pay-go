@@ -217,24 +217,14 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 		return
 	}
 
-	// 更新订单状态
+	// 更新订单状态（包含 ticket_no 更新）
+	// UpdateOrderStatus 方法会在事务中更新 ticket_no，这里不需要重复更新
 	if err := c.orderService.UpdateOrderStatus(ctx, order.ID, newStatus, notifyData.TradeNo); err != nil {
 		logger.Logger.Error("更新订单状态失败",
 			zap.String("order_id", order.ID),
 			zap.Int("status", newStatus),
 			zap.Error(err))
 		return
-	}
-
-	// 更新订单详情的 ticket_no（支付宝交易号）
-	if notifyData.TradeNo != "" {
-		if err := database.DB.Model(&models.OrderDetail{}).
-			Where("order_id = ?", order.ID).
-			Update("ticket_no", notifyData.TradeNo).Error; err != nil {
-			logger.Logger.Warn("更新订单详情失败",
-				zap.String("order_id", order.ID),
-				zap.Error(err))
-		}
 	}
 
 	// 通知商户（异步执行）
