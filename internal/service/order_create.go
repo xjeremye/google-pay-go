@@ -78,6 +78,9 @@ type OrderCreateContext struct {
 	DomainURL      string
 	Tax            int
 	SignKey        string
+	WriteoffID     *int64 // 核销ID（可能从插件获取）
+	SignRaw        string // 签名原始数据
+	Sign           string // 签名数据
 
 	// 关联对象
 	Merchant   *models.Merchant
@@ -297,7 +300,7 @@ func (s *OrderService) validateSign(ctx context.Context, orderCtx *OrderCreateCo
 		return ErrSignInvalid
 	}
 
-	_, actualSign := utils.GetSign(rawSignData, orderCtx.SignKey, nil, nil, orderCtx.Compatible)
+	signRaw, actualSign := utils.GetSign(rawSignData, orderCtx.SignKey, nil, nil, orderCtx.Compatible)
 	if sign != actualSign {
 		// 如果是开发、测试模式则输出正确签名
 		if config.Cfg.App.Mode == "debug" || config.Cfg.App.Mode == "test" {
@@ -306,6 +309,10 @@ func (s *OrderService) validateSign(ctx context.Context, orderCtx *OrderCreateCo
 		}
 		return ErrSignInvalid
 	}
+
+	// 保存签名原始数据和签名
+	orderCtx.SignRaw = signRaw
+	orderCtx.Sign = actualSign
 
 	return nil
 }
@@ -504,6 +511,12 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		}
 	}()
 
+	// 构建通道名称（格式：[通道ID]通道名称）
+	productName := ""
+	if orderCtx.Channel != nil {
+		productName = fmt.Sprintf("[%d]%s", orderCtx.Channel.ID, orderCtx.Channel.Name)
+	}
+
 	// 创建订单
 	order := &models.Order{
 		ID:             orderCtx.OrderID,
@@ -512,11 +525,14 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		OrderStatus:    models.OrderStatusPending,
 		Money:          orderCtx.Money,
 		Tax:            orderCtx.Tax,
+		ProductName:    productName,
+		ReqExtra:       orderCtx.Extra,
 		CreateDatetime: &now,
 		Compatible:     orderCtx.Compatible,
 		Ver:            1,
 		MerchantID:     &orderCtx.MerchantID,
 		PayChannelID:   &orderCtx.ChannelID,
+		WriteoffID:     orderCtx.WriteoffID,
 	}
 
 	if err := tx.Create(order).Error; err != nil {
@@ -543,10 +559,13 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		NotifyURL:      orderCtx.NotifyURL,
 		JumpURL:        orderCtx.JumpURL,
 		NotifyMoney:    orderCtx.NotifyMoney,
+		PluginType:     orderCtx.PluginType,
+		PluginUpstream: orderCtx.PluginUpstream,
 		CreateDatetime: &now,
 		Extra:          extraValue,
 		PluginID:       &orderCtx.PluginID,
 		DomainID:       orderCtx.DomainID,
+		WriteoffID:     orderCtx.WriteoffID,
 	}
 
 	if err := tx.Create(orderDetail).Error; err != nil {
@@ -559,7 +578,31 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		return NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("提交事务失败: %v", err))
 	}
 
+	// 创建订单日志（在事务外，避免影响主流程）
+	s.createOrderLog(ctx, orderCtx)
+
 	return nil
+}
+
+// createOrderLog 创建订单日志
+func (s *OrderService) createOrderLog(ctx context.Context, orderCtx *OrderCreateContext) {
+	if orderCtx.OutOrderNo == "" || orderCtx.SignRaw == "" {
+		return
+	}
+
+	orderLog := &models.OrderLog{
+		OutOrderNo: orderCtx.OutOrderNo,
+		SignRaw:    orderCtx.SignRaw,
+		Sign:       orderCtx.Sign,
+	}
+
+	// 使用 UpdateOrCreate 避免重复
+	database.DB.Where("out_order_no = ?", orderCtx.OutOrderNo).
+		Assign(map[string]interface{}{
+			"sign_raw": orderCtx.SignRaw,
+			"sign":     orderCtx.Sign,
+		}).
+		FirstOrCreate(orderLog)
 }
 
 // generatePayURL 生成支付URL（使用插件系统）

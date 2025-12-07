@@ -73,3 +73,50 @@ const (
 	OrderStatusCancelled = 3 // 已取消
 	OrderStatusExpired   = 4 // 已过期
 )
+
+// OrderDeviceDetail 订单设备详情模型
+type OrderDeviceDetail struct {
+	ID                int64      `gorm:"primaryKey;autoIncrement" json:"id"`
+	OrderID           string     `gorm:"uniqueIndex;type:varchar(30);not null;comment:关联订单" json:"order_id"`
+	IPAddress         string     `gorm:"type:varchar(255);index;comment:Ip地址" json:"ip_address"`
+	Address           string     `gorm:"type:varchar(32);comment:归属地" json:"address,omitempty"`
+	DeviceType        int        `gorm:"default:0;index;comment:设备类型" json:"device_type"`
+	DeviceFingerprint string     `gorm:"type:varchar(255);comment:设备指纹" json:"device_fingerprint,omitempty"`
+	PID               int        `gorm:"default:-1;comment:代理省ip" json:"pid"`
+	CID               int        `gorm:"default:-1;comment:代理城市ip" json:"cid"`
+	UserID            string     `gorm:"type:varchar(32);index;comment:用户id" json:"user_id,omitempty"`
+	CreateDatetime    *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
+	UpdateDatetime    *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
+}
+
+// TableName 指定表名
+func (OrderDeviceDetail) TableName() string {
+	return "dvadmin_order_device_detail"
+}
+
+// DeviceType 设备类型常量
+const (
+	DeviceTypeUnknown = 0 // 未知设备
+	DeviceTypeAndroid = 1 // Android
+	DeviceTypeIOS     = 2 // IOS
+	DeviceTypePC      = 4 // PC
+)
+
+// OrderLog 订单日志模型
+type OrderLog struct {
+	ID             int64      `gorm:"primaryKey;autoIncrement" json:"id"`
+	OutOrderNo     string     `gorm:"uniqueIndex;type:varchar(32);not null;comment:外部订单号" json:"out_order_no"`
+	SignRaw        string     `gorm:"type:longtext;comment:签名原始数据" json:"sign_raw,omitempty"`
+	Sign           string     `gorm:"type:varchar(32);comment:签名数据" json:"sign,omitempty"`
+	RequestBody    string     `gorm:"type:longtext;comment:请求参数" json:"request_body,omitempty"`
+	RequestMethod  string     `gorm:"type:varchar(8);comment:请求方式" json:"request_method,omitempty"`
+	ResponseCode   string     `gorm:"type:varchar(32);comment:响应状态码" json:"response_code,omitempty"`
+	JSONResult     string     `gorm:"type:longtext;comment:返回信息" json:"json_result,omitempty"`
+	CreateDatetime *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
+	UpdateDatetime *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
+}
+
+// TableName 指定表名
+func (OrderLog) TableName() string {
+	return "dvadmin_order_log"
+}

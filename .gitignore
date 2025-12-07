@@ -39,3 +39,6 @@ config/config.prod.yaml  # 生产环境配置可能包含敏感信息，不提�
 # OS
 .DS_Store
 Thumbs.db
+
+docs/backend
+docs/backend/*
