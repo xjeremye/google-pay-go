@@ -90,6 +90,7 @@ type OrderCreateContext struct {
 	Channel    *models.PayChannel
 	Plugin     *models.PayPlugin
 	PayType    *models.PayType
+	Domain     *models.PayDomain
 	User       *SystemUser
 	TenantUser *SystemUser
 
@@ -216,7 +217,13 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 		return nil, err
 	}
 
-	// 4. 等待产品（通过 product selector 选择产品）
+	// 4. 验证域名（收银台）
+	// 参考 Python: order_check_domain(ctx)
+	if err := s.validateDomain(ctx, orderCtx); err != nil {
+		return nil, err
+	}
+
+	// 5. 等待产品（通过 product selector 选择产品）
 	// 参考 Python: ctx.responder.wait_product(ctx)
 	// 这一步必须在创建订单之前，因为需要先获取产品ID、核销ID等信息
 	if err := s.waitProduct(ctx, orderCtx); err != nil {
@@ -228,10 +235,10 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 		return nil, err
 	}
 
-	// 6. 检查余额（简化版，实际需要查询租户余额表）
+	// 8. 检查余额（简化版，实际需要查询租户余额表）
 	// TODO: 实现余额检查
 
-	// 7. 生成支付URL（使用插件系统，此时产品已选择）
+	// 9. 生成支付URL（使用插件系统，此时产品已选择）
 	payURL, err := s.generatePayURL(ctx, orderCtx)
 	if err != nil {
 		return nil, err
@@ -423,6 +430,64 @@ func (s *OrderService) validatePlugin(ctx context.Context, orderCtx *OrderCreate
 	}
 
 	return nil
+}
+
+// validateDomain 验证域名（收银台）
+// 参考 Python: order_check_domain(ctx)
+func (s *OrderService) validateDomain(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	// 1. 首先检查插件是否自己设置了域名
+	// Python: domain_url = get_plugin_pay_domain(ctx.plugin.id, ctx.channel_id)
+	domainURL := s.getPluginPayDomain(ctx, orderCtx.PluginID, orderCtx.ChannelID)
+	if domainURL != "" {
+		// 如果插件设置了域名，尝试从数据库查找
+		var domain models.PayDomain
+		if err := database.DB.Where("url = ?", domainURL).First(&domain).Error; err == nil {
+			orderCtx.DomainID = &domain.ID
+			orderCtx.DomainURL = domain.URL
+			orderCtx.Domain = &domain
+			return nil
+		}
+		// 如果数据库中没有，直接使用插件设置的域名URL
+		orderCtx.DomainURL = domainURL
+		// DomainID 保持为 nil，表示使用自定义域名
+		return nil
+	}
+
+	// 2. 如果没有插件自定义域名，从可用域名中随机选择一个
+	// Python: 根据 plugin_upstream 判断是否支持微信/支付宝
+	var domain models.PayDomain
+	query := database.DB.Model(&models.PayDomain{}).Where("status = ?", true)
+
+	// 根据插件类型过滤
+	// Python: plugin_upstream == 6 表示微信，== 5 表示支付宝
+	if orderCtx.PluginUpstream == 6 {
+		// 微信
+		query = query.Where("wechat_status = ?", true)
+	} else if orderCtx.PluginUpstream == 5 {
+		// 支付宝
+		query = query.Where("pay_status = ?", true)
+	}
+	// else: 其他类型，只检查 status
+
+	// 随机选择一个
+	if err := query.Order("RAND()").First(&domain).Error; err != nil {
+		return NewOrderError(ErrCodeCreateFailed, "无可用收银台")
+	}
+
+	orderCtx.DomainID = &domain.ID
+	orderCtx.DomainURL = domain.URL
+	orderCtx.Domain = &domain
+
+	return nil
+}
+
+// getPluginPayDomain 获取插件自定义域名
+// 参考 Python: get_plugin_pay_domain(plugin_id: int, channel_id: int)
+func (s *OrderService) getPluginPayDomain(ctx context.Context, pluginID, channelID int64) string {
+	// TODO: 实现从 PayPluginConfig 表中获取插件配置
+	// Python: PayPluginConfig.objects.filter(parent_id=plugin_id, key="pay_domain").first()
+	// 当前简化实现，返回空字符串
+	return ""
 }
 
 // checkChannelTime 检查渠道可用时间

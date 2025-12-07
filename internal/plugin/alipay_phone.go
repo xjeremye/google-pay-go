@@ -73,8 +73,16 @@ func (p *AlipayPhonePlugin) CreateOrder(ctx context.Context, req *CreateOrderReq
 	}
 
 	// 获取域名信息
+	// 参考 Python: domain_id 通过 kwargs.get("domain_id") 获取
+	// 在 Go 中，domain_id 应该在订单创建时已经设置好了
+	// 如果没有设置，尝试从订单详情中获取
 	if req.DomainID == nil {
-		return NewErrorResponse(7320, "域名ID不能为空"), nil
+		// 从订单详情中获取 domain_id
+		if orderDetail.DomainID != nil {
+			req.DomainID = orderDetail.DomainID
+		} else {
+			return NewErrorResponse(7320, "域名ID不能为空"), nil
+		}
 	}
 
 	// 生成支付URL
