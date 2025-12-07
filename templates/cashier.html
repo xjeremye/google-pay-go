@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.title}} - 订单号：{{.order_no}}</title>
+    <title>收银台 - 订单号：{{.order_no}}</title>
     <style>
         * {
             margin: 0;
@@ -74,6 +74,11 @@
             color: #666;
             font-size: 14px;
         }
+        .error-text {
+            color: #e74c3c;
+            font-size: 14px;
+            margin-top: 15px;
+        }
         .pay-button {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -84,6 +89,7 @@
             cursor: pointer;
             margin-top: 20px;
             transition: transform 0.2s, box-shadow 0.2s;
+            display: none;
         }
         .pay-button:hover {
             transform: translateY(-2px);
@@ -109,21 +115,80 @@
         </div>
         <div class="loading">
             <div class="spinner"></div>
-            <div class="loading-text">正在跳转到支付页面...</div>
+            <div class="loading-text" id="loadingText">正在获取支付链接...</div>
+            <div class="error-text" id="errorText" style="display: none;"></div>
         </div>
-        <button class="pay-button" onclick="window.location.href='{{.pay_url}}'">立即支付</button>
+        <button class="pay-button" id="payButton" onclick="redirectToPay()">立即支付</button>
         <div class="footer">
             <p>如未自动跳转，请点击上方按钮</p>
         </div>
     </div>
     <script>
-        // 自动跳转到支付URL
-        var payURL = "{{.pay_url}}";
-        if (payURL) {
-            // 延迟1秒后自动跳转
+        // 参考 Python: 收银台通过前端 JavaScript 调用鉴权接口获取支付URL
+        var orderNo = "{{.order_no}}";
+        var needAuth = {{if .need_auth}}true{{else}}false{{end}};
+        var payURL = "";
+        {{if .need_auth}}
+        var authKey = "{{.auth_key}}";
+        var sign = "{{.sign}}";
+        var timestamp = {{.timestamp}};
+        {{else}}
+        payURL = "{{.pay_url}}";
+        {{end}}
+        
+        // 如果不需要鉴权，直接从订单详情获取支付URL（服务端已提供）
+        if (!needAuth && payURL) {
             setTimeout(function() {
                 window.location.href = payURL;
             }, 1000);
+        } else if (needAuth) {
+            // 需要鉴权，通过前端调用鉴权接口获取支付URL
+            // 参考 Python: 收银台调用鉴权接口的逻辑
+            getPayURLFromAuth();
+        } else {
+            showError("无法获取支付链接，请联系客服");
+        }
+        
+        function getPayURLFromAuth() {
+            // 构建鉴权URL
+            // 参考 Python: 收银台调用鉴权接口的逻辑
+            var authURL = "/api/v1/pay/auth?order_no=" + encodeURIComponent(orderNo) + 
+                         "&auth_key=" + encodeURIComponent(authKey) + 
+                         "&timestamp=" + timestamp + 
+                         "&sign=" + encodeURIComponent(sign);
+            
+            // 调用鉴权接口
+            fetch(authURL)
+                .then(function(response) {
+                    return response.json();
+                })
+                .then(function(data) {
+                    if (data.code === 200 && data.data && data.data.pay_url) {
+                        payURL = data.data.pay_url;
+                        document.getElementById("loadingText").textContent = "正在跳转到支付页面...";
+                        setTimeout(function() {
+                            window.location.href = payURL;
+                        }, 1000);
+                    } else {
+                        showError(data.message || "获取支付链接失败");
+                    }
+                })
+                .catch(function(error) {
+                    showError("请求失败，请重试");
+                });
+        }
+        
+        function redirectToPay() {
+            if (payURL) {
+                window.location.href = payURL;
+            }
+        }
+        
+        function showError(message) {
+            document.getElementById("loadingText").style.display = "none";
+            document.getElementById("errorText").style.display = "block";
+            document.getElementById("errorText").textContent = message;
+            document.getElementById("payButton").style.display = "none";
         }
     </script>
 </body>

@@ -266,111 +266,60 @@ func (c *PayController) Cashier(ctx *gin.Context) {
 		}
 	}
 
-	// 获取支付URL
-	var payURL string
-	if domain != nil && domain.AuthStatus && domain.AuthKey != "" {
-		// 需要鉴权，通过鉴权逻辑获取支付URL
-		// 参考 Python: 收银台调用鉴权接口获取支付URL
-		payURL = c.getPayURLWithAuth(ctx, orderNo, domain, &orderDetail)
-	} else {
-		// 不需要鉴权，直接从订单详情获取支付URL
-		payURL = c.getPayURLFromOrderDetail(&orderDetail)
-	}
-
-	if payURL == "" {
-		ctx.HTML(http.StatusNotFound, "error.html", gin.H{
-			"title":   "支付URL不存在",
-			"message": "无法获取支付链接，请联系客服",
-		})
-		return
-	}
-
 	// 格式化金额（分转元）
 	amount := float64(order.Money) / 100.0
 
-	// 渲染收银台页面
-	ctx.HTML(http.StatusOK, "cashier.html", gin.H{
-		"title":      "收银台",
+	// 判断是否需要鉴权
+	needAuth := domain != nil && domain.AuthStatus && domain.AuthKey != ""
+
+	// 准备模板数据
+	templateData := gin.H{
 		"order_no":   orderNo,
 		"amount":     amount,
-		"pay_url":    payURL,
+		"need_auth":  needAuth,
 		"expireTime": expireTimeStr,
-	})
-}
-
-// getPayURLWithAuth 通过鉴权逻辑获取支付URL
-// 参考 Python: 收银台调用鉴权接口的逻辑
-func (c *PayController) getPayURLWithAuth(ctx *gin.Context, orderNo string, domain *models.PayDomain, orderDetail *models.OrderDetail) string {
-	// 先从订单详情获取支付URL（优先使用已存储的支付URL）
-	payURL := c.getPayURLFromOrderDetail(orderDetail)
-	if payURL != "" {
-		return payURL
 	}
 
-	// 如果订单详情中没有支付URL，通过鉴权接口获取
-	// 生成鉴权参数
-	timestamp := time.Now().Unix()
-	authKey := utils.GetAuthKey(orderNo, domain.AuthKey, 30)
+	if needAuth {
+		// 需要鉴权，生成鉴权参数供前端调用
+		// 参考 Python: 收银台通过前端 JavaScript 调用鉴权接口
+		timestamp := time.Now().Unix()
+		authKey := utils.GetAuthKey(orderNo, domain.AuthKey, 30)
 
-	// 构建鉴权参数
-	authParams := map[string]interface{}{
-		"order_no":  orderNo,
-		"auth_key":  authKey,
-		"timestamp": timestamp,
-	}
-
-	// 生成签名
-	signData := make(map[string]interface{})
-	for k, v := range authParams {
-		if k != "sign" {
-			signData[k] = v
+		// 构建鉴权参数
+		authParams := map[string]interface{}{
+			"order_no":  orderNo,
+			"auth_key":  authKey,
+			"timestamp": timestamp,
 		}
-	}
-	_, sign := utils.GetSign(signData, authKey, nil, nil, 0)
 
-	// 构建鉴权URL（使用当前请求的 Host）
-	host := ctx.Request.Host
-	scheme := "http"
-	if ctx.Request.TLS != nil {
-		scheme = "https"
-	}
-	authURL := scheme + "://" + host + "/api/v1/pay/auth?order_no=" + orderNo + "&auth_key=" + authKey + "&timestamp=" + strconv.FormatInt(timestamp, 10) + "&sign=" + sign
-
-	// 调用鉴权接口
-	req, err := http.NewRequestWithContext(ctx.Request.Context(), "GET", authURL, nil)
-	if err != nil {
-		return ""
-	}
-
-	// 复制请求头
-	for k, v := range ctx.Request.Header {
-		req.Header[k] = v
-	}
-
-	// 发送请求
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-
-	// 解析响应
-	if resp.StatusCode == http.StatusOK {
-		var result struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-			Data    struct {
-				OrderNo string `json:"order_no"`
-				PayURL  string `json:"pay_url"`
-			} `json:"data"`
+		// 生成签名
+		signData := make(map[string]interface{})
+		for k, v := range authParams {
+			if k != "sign" {
+				signData[k] = v
+			}
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Code == 200 {
-			return result.Data.PayURL
+		_, sign := utils.GetSign(signData, authKey, nil, nil, 0)
+
+		templateData["auth_key"] = authKey
+		templateData["sign"] = sign
+		templateData["timestamp"] = timestamp
+	} else {
+		// 不需要鉴权，直接从订单详情获取支付URL
+		payURL := c.getPayURLFromOrderDetail(&orderDetail)
+		if payURL == "" {
+			ctx.HTML(http.StatusNotFound, "error.html", gin.H{
+				"title":   "支付URL不存在",
+				"message": "无法获取支付链接，请联系客服",
+			})
+			return
 		}
+		templateData["pay_url"] = payURL
 	}
 
-	return ""
+	// 渲染收银台页面
+	ctx.HTML(http.StatusOK, "cashier.html", templateData)
 }
 
 // getPayURLFromOrderDetail 从订单详情获取支付URL
