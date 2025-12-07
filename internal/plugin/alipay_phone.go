@@ -2,8 +2,10 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/golang-pay-core/internal/alipay"
 	"github.com/golang-pay-core/internal/database"
@@ -105,7 +107,11 @@ func (p *AlipayPhonePlugin) generatePayURL(ctx context.Context, req *CreateOrder
 
 	// 获取通知域名（从系统配置获取，如果没有则使用域名URL）
 	// Python: host = cache.get("system_config.alipay.inline_notify_domain")
-	notifyDomain := domainURL // TODO: 从系统配置获取 system_config.alipay.inline_notify_domain
+	notifyDomain := getSystemConfigByPath(ctx, "alipay.inline_notify_domain")
+	if notifyDomain == "" {
+		// 如果系统配置中没有，使用域名URL
+		notifyDomain = domainURL
+	}
 
 	// 构建通知URL
 	// Python: notify_url=f"{host}/api/pay/order/notify/{self._key}/{product_id}/"
@@ -128,9 +134,32 @@ func (p *AlipayPhonePlugin) generatePayURL(ctx context.Context, req *CreateOrder
 // generateSubject 生成订单主题
 // 参考 Python: 从 product.subject 或 get_plugin_subject 获取
 func (p *AlipayPhonePlugin) generateSubject(req *CreateOrderRequest) string {
-	// TODO: 从产品表获取 subject
+	// 从产品表获取 subject
 	// Python: product.subject.format(money=format_money(money), order_no=order_no, out_order_no=out_order_no)
-	// 或者: get_plugin_subject(plugin_id, money, order_no=order_no, out_order_no=out_order_no)
+	if req.ProductID != "" {
+		productIDInt, err := strconv.ParseInt(req.ProductID, 10, 64)
+		if err == nil {
+			var product models.AlipayProduct
+			if err := database.DB.Select("subject").Where("id = ?", productIDInt).First(&product).Error; err == nil {
+				if product.Subject != "" {
+					// 格式化主题：替换占位符
+					// Python: product.subject.format(money=format_money(money), order_no=order_no, out_order_no=out_order_no)
+					moneyStr := fmt.Sprintf("%.2f", float64(req.Money)/100)
+					subject := product.Subject
+					subject = strings.ReplaceAll(subject, "{money}", moneyStr)
+					subject = strings.ReplaceAll(subject, "{order_no}", req.OrderNo)
+					subject = strings.ReplaceAll(subject, "{out_order_no}", req.OutOrderNo)
+					// 支持 Python 风格的格式化
+					subject = strings.ReplaceAll(subject, "{{money}}", moneyStr)
+					subject = strings.ReplaceAll(subject, "{{order_no}}", req.OrderNo)
+					subject = strings.ReplaceAll(subject, "{{out_order_no}}", req.OutOrderNo)
+					if subject != product.Subject {
+						return subject
+					}
+				}
+			}
+		}
+	}
 
 	// 默认主题
 	moneyStr := fmt.Sprintf("%.2f", float64(req.Money)/100)
@@ -183,13 +212,33 @@ func (p *AlipayPhonePlugin) buildAlipayWapPayURL(req *CreateOrderRequest, domain
 	}
 
 	// 获取通道的 extra_arg（B2B 模式）
-	// TODO: 从 Channel 获取 extra_arg
-	// if channelExtraArg == 3 {
-	//     others["extend_params"] = map[string]interface{}{
-	//         "paySolution": "E_PAY",
-	//         "paySolutionConfig": "{\"paySolutionScene\":\"ENTERPRISE_PAY\"}",
-	//     }
-	// }
+	// 从 Channel 获取 extra_arg
+	if req.Channel != nil {
+		if extraArg, exists := req.Channel["extra_arg"]; exists {
+			// 处理不同类型的 extra_arg
+			var extraArgInt int
+			switch v := extraArg.(type) {
+			case int:
+				extraArgInt = v
+			case int64:
+				extraArgInt = int(v)
+			case float64:
+				extraArgInt = int(v)
+			case *int:
+				if v != nil {
+					extraArgInt = *v
+				}
+			}
+
+			if extraArgInt == 3 {
+				// B2B 模式
+				others["extend_params"] = map[string]interface{}{
+					"paySolution":       "E_PAY",
+					"paySolutionConfig": "{\"paySolutionScene\":\"ENTERPRISE_PAY\"}",
+				}
+			}
+		}
+	}
 
 	// 调用支付宝 SDK 生成支付 URL
 	payURL, err := alipayClient.TradeWapPay(subject, req.OrderNo, totalAmount, notifyURL, others)
@@ -242,3 +291,57 @@ func (p *AlipayPhonePlugin) GetTimeout(ctx context.Context, pluginID int64) int 
 // alipay_phone 插件嵌入 BasePlugin，直接使用基类的通用实现
 // 如果需要自定义逻辑，可以覆盖此方法
 // 当前实现：不覆盖，通过嵌入直接使用基类方法
+
+// getSystemConfigByPath 通过路径获取系统配置（避免循环依赖）
+// path 格式：如 "alipay.inline_notify_domain"
+func getSystemConfigByPath(ctx context.Context, path string) string {
+	// 先尝试直接获取
+	var config models.SystemConfig
+	if err := database.DB.Where("key = ? AND status = ? AND parent_id IS NULL", path, true).
+		First(&config).Error; err == nil {
+		return parseSystemConfigValue(config.Value)
+	}
+
+	// 如果直接获取失败，尝试按点分割路径
+	parts := strings.Split(path, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// 先找父配置
+	var parentConfig models.SystemConfig
+	if err := database.DB.Where("key = ? AND status = ? AND parent_id IS NULL", parts[0], true).
+		First(&parentConfig).Error; err != nil {
+		return ""
+	}
+
+	// 再找子配置
+	if err := database.DB.Where("key = ? AND status = ? AND parent_id = ?", parts[1], true, parentConfig.ID).
+		First(&config).Error; err != nil {
+		return ""
+	}
+
+	return parseSystemConfigValue(config.Value)
+}
+
+// parseSystemConfigValue 解析系统配置的 JSON 值
+func parseSystemConfigValue(valueStr string) string {
+	if valueStr == "" {
+		return ""
+	}
+
+	// 尝试解析 JSON
+	var valueMap map[string]interface{}
+	if err := json.Unmarshal([]byte(valueStr), &valueMap); err != nil {
+		// 如果解析失败，尝试直接返回原始值
+		return valueStr
+	}
+
+	// 尝试获取 value 字段
+	if value, ok := valueMap["value"].(string); ok {
+		return value
+	}
+
+	// 如果 value 不是字符串，返回空
+	return ""
+}

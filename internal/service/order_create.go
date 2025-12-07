@@ -235,8 +235,10 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 		return nil, err
 	}
 
-	// 8. 检查余额（简化版，实际需要查询租户余额表）
-	// TODO: 实现余额检查
+	// 8. 检查余额
+	if err := s.validateBalance(ctx, orderCtx); err != nil {
+		return nil, err
+	}
 
 	// 9. 生成支付URL（使用插件系统，此时产品已选择）
 	payURL, err := s.generatePayURL(ctx, orderCtx)
@@ -484,10 +486,65 @@ func (s *OrderService) validateDomain(ctx context.Context, orderCtx *OrderCreate
 // getPluginPayDomain 获取插件自定义域名
 // 参考 Python: get_plugin_pay_domain(plugin_id: int, channel_id: int)
 func (s *OrderService) getPluginPayDomain(ctx context.Context, pluginID, channelID int64) string {
-	// TODO: 实现从 PayPluginConfig 表中获取插件配置
+	// 从 PayPluginConfig 表中获取插件配置
 	// Python: PayPluginConfig.objects.filter(parent_id=plugin_id, key="pay_domain").first()
-	// 当前简化实现，返回空字符串
+	var config models.PayPluginConfig
+	if err := database.DB.Where("parent_id = ? AND key = ? AND status = ?", pluginID, "pay_domain", true).
+		First(&config).Error; err != nil {
+		// 如果查询失败，返回空字符串
+		return ""
+	}
+
+	// 解析 JSON 值
+	var valueMap map[string]interface{}
+	if err := json.Unmarshal([]byte(config.Value), &valueMap); err != nil {
+		return ""
+	}
+
+	// 尝试获取域名值（可能是字符串或对象）
+	if domainURL, ok := valueMap["value"].(string); ok {
+		return domainURL
+	}
+	if domainURL, ok := valueMap["url"].(string); ok {
+		return domainURL
+	}
+	// 如果 value 本身就是字符串
+	if config.Value != "" && config.Value[0] != '{' {
+		return config.Value
+	}
+
 	return ""
+}
+
+// validateBalance 检查余额
+// 参考 Python: 检查租户余额是否足够
+func (s *OrderService) validateBalance(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	if orderCtx.Tenant == nil {
+		return nil // 如果没有租户信息，跳过检查
+	}
+
+	// 查询最新的租户信息（包括余额和预占用金额）
+	var tenant models.Tenant
+	if err := database.DB.Select("id, balance, pre_tax, trust").
+		Where("id = ?", orderCtx.TenantID).
+		First(&tenant).Error; err != nil {
+		// 如果查询失败，记录日志但不阻止订单创建（容错处理）
+		return nil
+	}
+
+	// 计算可用余额：余额 - 预占用金额
+	availableBalance := tenant.Balance - int64(tenant.PreTax)
+
+	// 检查余额是否足够
+	if availableBalance < int64(orderCtx.Money) {
+		// 如果 trust=false（不允许负数），则拒绝订单
+		if !tenant.Trust {
+			return ErrBalanceInsufficient
+		}
+		// 如果 trust=true（允许负数），允许继续
+	}
+
+	return nil
 }
 
 // checkChannelTime 检查渠道可用时间

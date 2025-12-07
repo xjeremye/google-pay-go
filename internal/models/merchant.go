@@ -51,6 +51,10 @@ type Tenant struct {
 	CreateDatetime *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
 	UpdateDatetime *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
 	Remarks        string     `gorm:"type:varchar(255);comment:备注" json:"remarks,omitempty"`
+	Balance        int64      `gorm:"not null;default:0;comment:金额" json:"balance"`
+	PreTax         int        `gorm:"not null;default:0;comment:占用金额" json:"pre_tax"`
+	Trust          bool       `gorm:"not null;default:0;comment:允许负数拉单" json:"trust"`
+	SystemUserID   *int64     `gorm:"uniqueIndex;comment:绑定的系统用户" json:"system_user_id,omitempty"`
 
 	// 关联关系
 	Merchants []Merchant `gorm:"foreignKey:ParentID" json:"merchants,omitempty"`
