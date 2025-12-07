@@ -11,9 +11,11 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-pay-core/config"
 	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/plugin"
 	"github.com/golang-pay-core/internal/utils"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -28,17 +30,20 @@ func isValidJSON(s string) bool {
 
 // CreateOrderRequest 创建订单请求
 type CreateOrderRequest struct {
-	OutOrderNo  string                 `json:"mchOrderNo" binding:"required"`   // 商户订单号
-	MerchantID  int                    `json:"mchId" binding:"required"`        // 商户ID
-	ChannelID   int                    `json:"channelId" binding:"required"`    // 渠道ID
-	Money       int                    `json:"amount" binding:"required,min=1"` // 金额（分）
-	NotifyURL   string                 `json:"notifyUrl" binding:"required"`    // 通知地址
-	JumpURL     string                 `json:"jumpUrl"`                         // 跳转地址
-	Extra       string                 `json:"extra"`                           // 额外参数
-	Compatible  int                    `json:"compatible"`                      // 兼容模式 0/1
-	Test        bool                   `json:"test"`                            // 测试模式
-	Sign        string                 `json:"sign" binding:"required"`         // 签名
-	RawSignData map[string]interface{} `json:"-"`                               // 原始签名数据（内部使用）
+	OutOrderNo    string                 `json:"mchOrderNo" binding:"required"`   // 商户订单号
+	MerchantID    int                    `json:"mchId" binding:"required"`        // 商户ID
+	ChannelID     int                    `json:"channelId" binding:"required"`    // 渠道ID
+	Money         int                    `json:"amount" binding:"required,min=1"` // 金额（分）
+	NotifyURL     string                 `json:"notifyUrl" binding:"required"`    // 通知地址
+	JumpURL       string                 `json:"jumpUrl"`                         // 跳转地址
+	Extra         string                 `json:"extra"`                           // 额外参数
+	Compatible    int                    `json:"compatible"`                      // 兼容模式 0/1
+	Test          bool                   `json:"test"`                            // 测试模式
+	Sign          string                 `json:"sign" binding:"required"`         // 签名
+	RawSignData   map[string]interface{} `json:"-"`                               // 原始签名数据（内部使用）
+	SignRaw       string                 `json:"-"`                               // 签名原始数据（JSON字符串，用于日志）
+	RequestMethod string                 `json:"-"`                               // 请求方法（GET/POST）
+	RequestBody   string                 `json:"-"`                               // 请求体（JSON字符串，用于日志）
 }
 
 // CreateOrderResponse 创建订单响应
@@ -98,6 +103,10 @@ type OrderCreateContext struct {
 	// 订单信息
 	OrderNo string
 	OrderID string
+
+	// 请求信息（用于日志记录）
+	RequestMethod string // 请求方法（GET/POST）
+	RequestBody   string // 请求体（JSON字符串）
 }
 
 // 实现 plugin.OrderContext 接口
@@ -180,6 +189,7 @@ func (a *pluginInfoProviderAdapter) GetPluginPayTypes(ctx context.Context, plugi
 // CreateOrder 创建订单（主入口）
 func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest) (*CreateOrderResponse, *OrderError) {
 	startTime := time.Now()
+	firstTime := startTime.UnixMilli()
 
 	// 1. 基础验证
 	if req.Money <= 0 {
@@ -188,14 +198,17 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 
 	// 2. 创建上下文
 	orderCtx := &OrderCreateContext{
-		OutOrderNo:  req.OutOrderNo,
-		NotifyURL:   req.NotifyURL,
-		Money:       req.Money,
-		JumpURL:     req.JumpURL,
-		NotifyMoney: req.Money,
-		Extra:       req.Extra,
-		Compatible:  req.Compatible,
-		Test:        req.Test,
+		OutOrderNo:    req.OutOrderNo,
+		NotifyURL:     req.NotifyURL,
+		Money:         req.Money,
+		JumpURL:       req.JumpURL,
+		NotifyMoney:   req.Money,
+		Extra:         req.Extra,
+		Compatible:    req.Compatible,
+		Test:          req.Test,
+		SignRaw:       req.SignRaw,
+		RequestMethod: req.RequestMethod,
+		RequestBody:   req.RequestBody,
 	}
 
 	// 3. 执行验证链
@@ -224,11 +237,28 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 		return nil, err
 	}
 
+	// 记录预操作耗时
+	secondTime := time.Now().UnixMilli()
+	preOpElapsed := secondTime - firstTime
+	if preOpElapsed > 1000 {
+		logger.Logger.Error("拉单预操作耗时过长",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.Int64("elapsed_ms", preOpElapsed))
+	}
+
 	// 5. 等待产品（通过 product selector 选择产品）
 	// 参考 Python: ctx.responder.wait_product(ctx)
 	// 这一步必须在创建订单之前，因为需要先获取产品ID、核销ID等信息
+	waitProductStartTime := time.Now()
 	if err := s.waitProduct(ctx, orderCtx); err != nil {
 		return nil, err
+	}
+	waitProductElapsed := time.Since(waitProductStartTime).Milliseconds()
+	if waitProductElapsed > 1000 {
+		logger.Logger.Error("拉单检测货物耗时过长",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.Int64("elapsed_ms", waitProductElapsed),
+			zap.Int64("total_elapsed_ms", time.Since(startTime).Milliseconds()))
 	}
 
 	// 5. 创建订单和详情（此时已经有产品ID、核销ID等信息）
@@ -242,6 +272,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 	}
 
 	// 9. 生成支付URL（使用插件系统，此时产品已选择）
+	thirdTime := time.Now()
 	payURL, err := s.generatePayURL(ctx, orderCtx)
 	if err != nil {
 		return nil, err
@@ -254,18 +285,60 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 		return nil, err
 	}
 
+	// 记录生成支付URL耗时
+	forthTime := time.Now()
+	payURLElapsed := forthTime.Sub(thirdTime).Milliseconds()
+	logger.Logger.Info("拉单生成支付URL耗时",
+		zap.String("out_order_no", orderCtx.OutOrderNo),
+		zap.Int64("elapsed_ms", payURLElapsed),
+		zap.Int64("total_elapsed_ms", forthTime.Sub(startTime).Milliseconds()))
+
 	// 7. 设置缓存
 	s.setCache(ctx, orderCtx)
 
 	// 8. 构建响应
 	response := s.buildResponse(orderCtx, finalURL)
 
-	// 记录耗时
-	elapsed := time.Since(startTime)
-	if elapsed > 1*time.Second {
-		// TODO: 记录慢查询日志
-		fmt.Printf("[Order] Create order %s took %v\n", orderCtx.OrderNo, elapsed)
+	// 记录最后阶段耗时
+	fifthTime := time.Now()
+	lastStageElapsed := fifthTime.Sub(forthTime).Milliseconds()
+	totalElapsed := fifthTime.Sub(startTime).Milliseconds()
+	if lastStageElapsed > 500 {
+		logger.Logger.Error("拉单最后阶段耗时过长",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.Int64("elapsed_ms", lastStageElapsed),
+			zap.Int64("total_elapsed_ms", totalElapsed))
+	} else {
+		logger.Logger.Info("拉单最后阶段耗时",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.Int64("elapsed_ms", lastStageElapsed),
+			zap.Int64("total_elapsed_ms", totalElapsed))
 	}
+
+	// 记录订单创建成功日志
+	// 参考 Python: logger.info(f"订单创建成功, 订单号:{ctx.order.order_no}({ctx.out_order_no}), ...")
+	logger.Logger.Info("订单创建成功",
+		zap.String("order_no", orderCtx.OrderNo),
+		zap.String("out_order_no", orderCtx.OutOrderNo),
+		zap.Int("money", orderCtx.Money),
+		zap.Int("tax", orderCtx.Tax),
+		zap.Int64("merchant_id", orderCtx.MerchantID),
+		zap.Int64("tenant_id", orderCtx.TenantID),
+		zap.Int64("channel_id", orderCtx.ChannelID),
+		zap.String("domain", func() string {
+			if orderCtx.Domain != nil {
+				return orderCtx.DomainURL
+			}
+			return ""
+		}()),
+		zap.String("product_id", orderCtx.ProductID),
+		zap.String("plugin_type", orderCtx.PluginType),
+		zap.Int("plugin_upstream", orderCtx.PluginUpstream),
+		zap.Int64("total_elapsed_ms", totalElapsed))
+
+	// 注意：响应信息的记录应该在 Controller 层完成，因为响应格式可能包含额外的包装
+	// 这里保留作为备用，但主要逻辑应该在 Controller 层
+	// s.updateOrderLogResponse(ctx, orderCtx, response)
 
 	return response, nil
 }
@@ -337,6 +410,11 @@ func (s *OrderService) validateSign(ctx context.Context, orderCtx *OrderCreateCo
 	}
 
 	// 保存签名原始数据和签名
+	// 注意：signRaw 是 GetSign 返回的用于签名的原始字符串（如 "key=value&key=value&key=xxx"）
+	// 但根据 Python 代码和数据库表结构，sign_raw 字段应该存储的是原始请求数据的 JSON 字符串
+	// 这里保存 signRaw（用于签名的原始字符串）到 orderCtx.SignRaw
+	// 如果 Controller 层已经设置了 SignRaw（JSON 格式），这里会覆盖它
+	// 为了保持与 Python 代码一致，这里使用 signRaw（用于签名的原始字符串）
 	orderCtx.SignRaw = signRaw
 	orderCtx.Sign = actualSign
 
@@ -726,24 +804,87 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 }
 
 // createOrderLog 创建订单日志
+// 参考 Python: update_or_create_order_log(ctx.out_order_no, ctx.sign_raw, ctx.sign)
+// 注意：Python 代码中只传入了 out_order_no, sign_raw, sign 三个参数
+// 但根据数据库表结构，还需要记录 request_body, request_method 等字段
+// 这些字段应该在 Controller 层传入，这里使用 orderCtx 中的信息
 func (s *OrderService) createOrderLog(ctx context.Context, orderCtx *OrderCreateContext) {
-	if orderCtx.OutOrderNo == "" || orderCtx.SignRaw == "" {
+	if orderCtx.OutOrderNo == "" {
 		return
 	}
 
+	now := time.Now()
 	orderLog := &models.OrderLog{
-		OutOrderNo: orderCtx.OutOrderNo,
-		SignRaw:    orderCtx.SignRaw,
-		Sign:       orderCtx.Sign,
+		OutOrderNo:     orderCtx.OutOrderNo,
+		SignRaw:        orderCtx.SignRaw,
+		Sign:           orderCtx.Sign,
+		RequestBody:    orderCtx.RequestBody,
+		RequestMethod:  orderCtx.RequestMethod,
+		CreateDatetime: &now,
 	}
 
-	// 使用 UpdateOrCreate 避免重复
-	database.DB.Where("out_order_no = ?", orderCtx.OutOrderNo).
-		Assign(map[string]interface{}{
-			"sign_raw": orderCtx.SignRaw,
-			"sign":     orderCtx.Sign,
-		}).
-		FirstOrCreate(orderLog)
+	// 使用 FirstOrCreate + Assign 实现 UpdateOrCreate
+	// 参考 Python: update_or_create_order_log(ctx.out_order_no, ctx.sign_raw, ctx.sign)
+	// 注意：Python 代码中只传入了三个参数，但数据库表有更多字段
+	// 这里使用 GORM 的 FirstOrCreate + Assign 实现完整的 UpdateOrCreate
+	// 如果记录已存在，更新字段（但不覆盖响应信息）；如果不存在，创建新记录
+	var existingLog models.OrderLog
+	if err := database.DB.Where("out_order_no = ?", orderCtx.OutOrderNo).First(&existingLog).Error; err != nil {
+		// 记录不存在，创建新记录
+		if err := database.DB.Create(orderLog).Error; err != nil {
+			logger.Logger.Warn("创建订单日志失败",
+				zap.String("out_order_no", orderCtx.OutOrderNo),
+				zap.Error(err))
+		}
+	} else {
+		// 记录已存在，更新请求相关字段（但不覆盖响应信息，如果已有响应信息）
+		updates := map[string]interface{}{
+			"sign_raw":       orderCtx.SignRaw,
+			"sign":           orderCtx.Sign,
+			"request_body":   orderCtx.RequestBody,
+			"request_method": orderCtx.RequestMethod,
+		}
+		// 如果还没有响应信息，更新 create_datetime
+		if existingLog.JSONResult == "" && existingLog.ResponseCode == "" {
+			updates["create_datetime"] = &now
+		}
+		if err := database.DB.Model(&models.OrderLog{}).
+			Where("out_order_no = ?", orderCtx.OutOrderNo).
+			Updates(updates).Error; err != nil {
+			logger.Logger.Warn("更新订单日志失败",
+				zap.String("out_order_no", orderCtx.OutOrderNo),
+				zap.Error(err))
+		}
+	}
+}
+
+// updateOrderLogResponse 更新订单日志的响应信息
+// 注意：这个方法在 Service 层调用，但实际响应格式由 Controller 层决定
+// 参考 Python: 响应信息应该在 Controller 层记录，因为响应格式可能包含额外的包装
+// 这个方法保留作为备用，但主要逻辑应该在 Controller 层
+func (s *OrderService) updateOrderLogResponse(ctx context.Context, orderCtx *OrderCreateContext, response *CreateOrderResponse) {
+	if orderCtx.OutOrderNo == "" {
+		return
+	}
+
+	// 将响应转换为JSON字符串
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		logger.Logger.Warn("序列化订单响应失败",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.Error(err))
+		return
+	}
+
+	now := time.Now()
+	// 更新订单日志的响应信息
+	database.DB.Model(&models.OrderLog{}).
+		Where("out_order_no = ?", orderCtx.OutOrderNo).
+		Updates(map[string]interface{}{
+			"json_result":     string(responseJSON),
+			"response_code":   "200",
+			"update_datetime": &now,
+		})
 }
 
 // generatePayURL 生成支付URL（使用插件系统）
@@ -819,11 +960,34 @@ func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreate
 	// 调用插件创建订单
 	createResp, err := pluginInstance.CreateOrder(ctx, createReq)
 	if err != nil {
+		// 记录插件调用失败的错误
+		logger.Logger.Error("插件创建订单失败",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.String("order_no", orderCtx.OrderNo),
+			zap.Int64("plugin_id", orderCtx.PluginID),
+			zap.String("plugin_type", orderCtx.PluginType),
+			zap.Error(err))
 		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("创建订单失败: %v", err))
+	}
+
+	// 记录插件响应到订单详情的 Extra 字段
+	// 参考 Python: 上游响应应该被记录，包括成功和失败的情况
+	if err := s.recordPluginResponseToOrderDetail(ctx, orderCtx.OrderID, createResp); err != nil {
+		logger.Logger.Warn("记录插件响应失败",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.String("order_no", orderCtx.OrderNo),
+			zap.Error(err))
+		// 记录失败不影响主流程，继续执行
 	}
 
 	// 检查响应
 	if !createResp.IsSuccess() {
+		// 记录插件返回的错误
+		logger.Logger.Error("插件返回错误",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.String("order_no", orderCtx.OrderNo),
+			zap.Int("error_code", createResp.ErrorCode),
+			zap.String("error_message", createResp.ErrorMessage))
 		return "", NewOrderError(createResp.ErrorCode, createResp.ErrorMessage)
 	}
 
@@ -855,8 +1019,64 @@ func (s *OrderService) getAuthURL(ctx context.Context, orderCtx *OrderCreateCont
 	return cashierURL, nil
 }
 
+// recordPluginResponseToOrderDetail 记录插件响应到订单详情的 Extra 字段
+// 参考 Python: 上游响应应该被记录，包括成功和失败的情况
+func (s *OrderService) recordPluginResponseToOrderDetail(ctx context.Context, orderID string, pluginResp *plugin.CreateOrderResponse) error {
+	// 获取订单详情
+	var orderDetail models.OrderDetail
+	if err := database.DB.Where("order_id = ?", orderID).First(&orderDetail).Error; err != nil {
+		return err
+	}
+
+	// 解析现有的 Extra 字段
+	extraMap := make(map[string]interface{})
+	if orderDetail.Extra != "" && orderDetail.Extra != "{}" {
+		if err := json.Unmarshal([]byte(orderDetail.Extra), &extraMap); err != nil {
+			// 如果解析失败，创建新的 map
+			extraMap = make(map[string]interface{})
+		}
+	}
+
+	// 构建插件响应数据
+	pluginResponseData := map[string]interface{}{
+		"success": pluginResp.Success,
+	}
+	if pluginResp.Success {
+		// 成功情况：记录支付URL
+		pluginResponseData["pay_url"] = pluginResp.PayURL
+		if len(pluginResp.ExtraData) > 0 {
+			pluginResponseData["extra_data"] = pluginResp.ExtraData
+		}
+	} else {
+		// 失败情况：记录错误信息
+		pluginResponseData["error_code"] = pluginResp.ErrorCode
+		pluginResponseData["error_message"] = pluginResp.ErrorMessage
+		if len(pluginResp.ExtraData) > 0 {
+			pluginResponseData["extra_data"] = pluginResp.ExtraData
+		}
+	}
+
+	// 添加插件响应到 Extra（使用 plugin_response 作为 key）
+	extraMap["plugin_response"] = pluginResponseData
+
+	// 如果成功且有支付URL，也单独存储 pay_url（用于向后兼容）
+	if pluginResp.Success && pluginResp.PayURL != "" {
+		extraMap["pay_url"] = pluginResp.PayURL
+	}
+
+	// 序列化并更新
+	extraJSON, err := json.Marshal(extraMap)
+	if err != nil {
+		return err
+	}
+
+	// 更新订单详情
+	return database.DB.Model(&orderDetail).Update("extra", string(extraJSON)).Error
+}
+
 // storePayURLToOrderDetail 将支付URL存储到订单详情的 Extra 字段中
 // 参考 Python: 存储支付URL以便收银台获取
+// 注意：这个方法主要用于向后兼容，实际应该使用 recordPluginResponseToOrderDetail
 func (s *OrderService) storePayURLToOrderDetail(ctx context.Context, orderID string, payURL string) error {
 	// 获取订单详情
 	var orderDetail models.OrderDetail

@@ -1,10 +1,17 @@
 package controller
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/response"
 	"github.com/golang-pay-core/internal/service"
 )
@@ -50,16 +57,31 @@ func NewOrderController() *OrderController {
 func (c *OrderController) CreateOrder(ctx *gin.Context) {
 	var req service.CreateOrderRequest
 	var rawSignData map[string]interface{}
+	var requestBody string
+
+	// 记录请求方法
+	req.RequestMethod = ctx.Request.Method
 
 	// 根据请求方法选择不同的参数绑定方式
 	if ctx.Request.Method == "GET" {
 		// GET 请求：从 Query String 读取参数
 		rawSignData = c.parseQueryParams(ctx, &req)
+		// 将查询参数转换为JSON字符串
+		if bodyJSON, err := json.Marshal(rawSignData); err == nil {
+			requestBody = string(bodyJSON)
+		}
 	} else {
 		// POST 请求：尝试从 JSON Body 或 Form 读取参数
 		contentType := ctx.GetHeader("Content-Type")
 		if contentType == "application/json" || contentType == "application/json; charset=utf-8" {
-			// JSON 格式
+			// JSON 格式：读取原始请求体
+			bodyBytes, err := io.ReadAll(ctx.Request.Body)
+			if err == nil {
+				requestBody = string(bodyBytes)
+				// 恢复请求体供 ShouldBindJSON 使用
+				ctx.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			}
+
 			if err := ctx.ShouldBindJSON(&req); err != nil {
 				response.Fail(ctx, http.StatusBadRequest, "参数错误: "+err.Error())
 				return
@@ -79,20 +101,125 @@ func (c *OrderController) CreateOrder(ctx *gin.Context) {
 		} else {
 			// Form 格式（application/x-www-form-urlencoded 或 multipart/form-data）
 			rawSignData = c.parseFormParams(ctx, &req)
+			// 将表单参数转换为JSON字符串
+			if bodyJSON, err := json.Marshal(rawSignData); err == nil {
+				requestBody = string(bodyJSON)
+			}
 		}
 	}
 
 	req.RawSignData = rawSignData
+	req.RequestBody = requestBody
+
+	// 将签名原始数据转换为JSON字符串（用于日志）
+	// 参考 Python: ctx.sign_raw 应该是签名原始数据的字符串表示
+	// 注意：这里先保存完整的 rawSignData（包含 sign 字段），
+	// 后续在 validateSign 中会生成正确的 signRaw（用于签名的原始数据，不包含 sign）
+	// 但为了保持与 Python 代码一致，这里先保存完整数据
+	if signRawJSON, err := json.Marshal(rawSignData); err == nil {
+		req.SignRaw = string(signRawJSON)
+	}
 
 	// 创建订单
 	orderResp, orderErr := c.orderService.CreateOrder(ctx.Request.Context(), &req)
 	if orderErr != nil {
+		// 记录错误响应到 order_log
+		c.recordOrderLogError(ctx, &req, orderErr)
 		// 返回业务错误码和消息
 		response.FailWithCode(ctx, orderErr.Code, orderErr.Message)
 		return
 	}
 
+	// 记录成功响应到 order_log
+	c.recordOrderLogSuccess(ctx, &req, orderResp)
 	response.Success(ctx, orderResp)
+}
+
+// recordOrderLogError 记录订单日志的错误响应
+// 参考 Python: 错误情况下也应该记录到 order_log
+// 注意：如果订单创建失败，可能 Service 层的 createOrderLog 还没有执行
+// 所以需要在这里确保 order_log 已创建
+func (c *OrderController) recordOrderLogError(ctx *gin.Context, req *service.CreateOrderRequest, orderErr *service.OrderError) {
+	if req.OutOrderNo == "" {
+		return
+	}
+
+	// 先确保订单日志已创建（如果还没有创建）
+	// 参考 Python: 即使错误情况下，也应该先创建 order_log 记录请求信息
+	now := time.Now()
+	var existingLog models.OrderLog
+	if err := database.DB.Where("out_order_no = ?", req.OutOrderNo).First(&existingLog).Error; err != nil {
+		// 记录不存在，创建新记录（包含请求信息）
+		// 注意：req.SignRaw 在 Controller 层是 rawSignData 的 JSON 字符串
+		// 如果 validateSign 已执行，Service 层会更新 orderCtx.SignRaw 为 signRaw（用于签名的原始字符串）
+		// 但这里无法访问 Service 层的 orderCtx，所以使用 req.SignRaw（JSON 格式）
+		// 根据 Python 代码，sign_raw 应该存储原始请求数据的字符串表示
+		orderLog := &models.OrderLog{
+			OutOrderNo:     req.OutOrderNo,
+			SignRaw:        req.SignRaw, // JSON 格式的原始签名数据
+			Sign:           "",          // 如果 validateSign 已执行，这个值会在后续更新中设置
+			RequestBody:    req.RequestBody,
+			RequestMethod:  req.RequestMethod,
+			CreateDatetime: &now,
+		}
+		if err := database.DB.Create(orderLog).Error; err != nil {
+			// 创建失败，记录警告但不影响主流程
+			return
+		}
+	}
+
+	// 构建错误响应（参考 response.FailWithCode 的格式）
+	errorResponse := response.Response{
+		Code:    orderErr.Code,
+		Message: orderErr.Message,
+		Data:    orderErr.Data,
+	}
+
+	// 将错误响应转换为JSON字符串
+	responseJSON, err := json.Marshal(errorResponse)
+	if err != nil {
+		return
+	}
+
+	// 更新订单日志的错误响应信息
+	database.DB.Model(&models.OrderLog{}).
+		Where("out_order_no = ?", req.OutOrderNo).
+		Updates(map[string]interface{}{
+			"json_result":     string(responseJSON),
+			"response_code":   fmt.Sprintf("%d", orderErr.Code), // 使用错误码作为响应码
+			"update_datetime": &now,
+		})
+}
+
+// recordOrderLogSuccess 记录订单日志的成功响应
+// 参考 Python: 成功情况下记录响应到 order_log
+func (c *OrderController) recordOrderLogSuccess(ctx *gin.Context, req *service.CreateOrderRequest, orderResp *service.CreateOrderResponse) {
+	if req.OutOrderNo == "" {
+		return
+	}
+
+	// 构建成功响应（参考 response.Success 的格式）
+	successResponse := response.Response{
+		Code:    200,
+		Message: "success",
+		Data:    orderResp,
+	}
+
+	// 将成功响应转换为JSON字符串
+	responseJSON, err := json.Marshal(successResponse)
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	// 更新订单日志的成功响应信息
+	database.DB.Model(&models.OrderLog{}).
+		Where("out_order_no = ?", req.OutOrderNo).
+		Updates(map[string]interface{}{
+			"json_result":     string(responseJSON),
+			"response_code":   "200",
+			"update_datetime": &now,
+		})
 }
 
 // parseQueryParams 解析 GET 请求的查询参数

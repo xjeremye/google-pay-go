@@ -5,8 +5,10 @@ import (
 	"fmt"
 
 	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/plugin"
+	"go.uber.org/zap"
 )
 
 // waitProduct 等待产品（获取产品ID、核销ID、CookieID等）
@@ -45,11 +47,41 @@ func (s *OrderService) waitProduct(ctx context.Context, orderCtx *OrderCreateCon
 	// 调用插件等待产品
 	waitResp, err := pluginInstance.WaitProduct(ctx, waitReq)
 	if err != nil {
+		// 参考 Python: logger.error(f"{ctx.out_order_no}_等待产品失败")
+		logger.Logger.Error("等待产品失败",
+			zap.String("out_order_no", orderCtx.OutOrderNo),
+			zap.Error(err))
 		return NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("等待产品失败: %v", err))
 	}
 
 	// 检查响应
 	if !waitResp.Success {
+		// 根据错误码记录不同的错误日志
+		// 参考 Python: logger.error(f"{ctx.out_order_no}_没有可选核销")
+		// 参考 Python: logger.error(f"{ctx.out_order_no}_无货物库存")
+		// 参考 Python: logger.error(f"{ctx.out_order_no}_无小号库存")
+		if waitResp.ErrorCode == ErrCodeNoStock {
+			if waitResp.ErrorMessage == "无库存" || waitResp.ErrorMessage == "没有可选核销" {
+				logger.Logger.Error("没有可选核销",
+					zap.String("out_order_no", orderCtx.OutOrderNo))
+			} else if waitResp.ErrorMessage == "无货物库存" {
+				logger.Logger.Error("无货物库存",
+					zap.String("out_order_no", orderCtx.OutOrderNo))
+			} else if waitResp.ErrorMessage == "无小号库存" {
+				logger.Logger.Error("无小号库存",
+					zap.String("out_order_no", orderCtx.OutOrderNo))
+			} else {
+				logger.Logger.Error("等待产品失败",
+					zap.String("out_order_no", orderCtx.OutOrderNo),
+					zap.Int("error_code", waitResp.ErrorCode),
+					zap.String("error_message", waitResp.ErrorMessage))
+			}
+		} else {
+			logger.Logger.Error("等待产品失败",
+				zap.String("out_order_no", orderCtx.OutOrderNo),
+				zap.Int("error_code", waitResp.ErrorCode),
+				zap.String("error_message", waitResp.ErrorMessage))
+		}
 		return NewOrderError(waitResp.ErrorCode, waitResp.ErrorMessage)
 	}
 
