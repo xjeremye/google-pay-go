@@ -57,7 +57,8 @@ func SetupRouter() *gin.Engine {
 	payController := controller.NewPayController()
 	pay := r.Group("/api/v1/pay")
 	{
-		pay.GET("/auth", payController.Auth) // 鉴权接口
+		pay.GET("/auth", payController.Auth)     // 鉴权接口
+		pay.GET("/device", payController.Device) // 设备指纹收集接口
 	}
 
 	// 收银台路由（不需要 /api/v1 前缀，参考 Python 代码）

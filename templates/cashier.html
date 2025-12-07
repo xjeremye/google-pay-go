@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>收银台 - 订单号：{{.order_no}}</title>
+    <!-- FingerprintJS 库 - 用于生成设备指纹 -->
+    <script src="https://cdn.jsdelivr.net/npm/@fingerprintjs/fingerprintjs@4/dist/fp.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -136,17 +138,132 @@
         payURL = "{{.pay_url}}";
         {{end}}
         
-        // 如果不需要鉴权，直接从订单详情获取支付URL（服务端已提供）
-        if (!needAuth && payURL) {
-            setTimeout(function() {
-                window.location.href = payURL;
-            }, 1000);
-        } else if (needAuth) {
-            // 需要鉴权，通过前端调用鉴权接口获取支付URL
-            // 参考 Python: 收银台调用鉴权接口的逻辑
-            getPayURLFromAuth();
+        // FingerprintJS 初始化
+        var fpPromise = null;
+        var fingerprintSent = false;
+        var fingerprintSubmitted = false; // 指纹是否已成功提交
+        
+        // 使用 FingerprintJS 生成设备指纹并发送到服务器
+        // 参考: https://dev.fingerprintjs.com/docs
+        // 如果指纹获取失败，则不进行下一步操作（不提交指纹，不跳转支付）
+        function sendDeviceFingerprint() {
+            // 防止重复发送
+            if (fingerprintSent) {
+                return;
+            }
+            
+            // 检查 FingerprintJS 是否已加载
+            if (typeof FingerprintJS === 'undefined') {
+                // 如果库未加载，等待一下再尝试
+                setTimeout(function() {
+                    if (!fingerprintSent && typeof FingerprintJS !== 'undefined') {
+                        initAndSendFingerprint();
+                    } else if (!fingerprintSent) {
+                        // 如果等待后仍未加载，不进行任何操作（不提交指纹，不跳转支付）
+                        console.warn('FingerprintJS 库未加载，跳过指纹提交和支付跳转');
+                        showError("设备指纹获取失败，无法继续支付");
+                    }
+                }, 1000);
+                return;
+            }
+            
+            // 初始化并发送指纹
+            initAndSendFingerprint();
+        }
+        
+        // 初始化 FingerprintJS 并发送指纹
+        function initAndSendFingerprint() {
+            if (fingerprintSent) {
+                return;
+            }
+            
+            try {
+                // 加载 FingerprintJS
+                if (!fpPromise) {
+                    fpPromise = FingerprintJS.load();
+                }
+                
+                // 获取设备指纹
+                fpPromise
+                    .then(function(fp) {
+                        return fp.get();
+                    })
+                    .then(function(result) {
+                        // result.visitorId 是设备的唯一标识符
+                        var fingerprint = result.visitorId;
+                        if (fingerprint) {
+                            submitFingerprint(fingerprint);
+                        } else {
+                            console.warn('FingerprintJS 返回的指纹为空，跳过提交和支付跳转');
+                            showError("设备指纹获取失败，无法继续支付");
+                        }
+                    })
+                    .catch(function(error) {
+                        // 如果 FingerprintJS 失败，不进行任何操作（不提交指纹，不跳转支付）
+                        console.warn('FingerprintJS 获取失败，跳过指纹提交和支付跳转:', error);
+                        showError("设备指纹获取失败，无法继续支付");
+                    });
+            } catch (error) {
+                // 如果初始化失败，不进行任何操作（不提交指纹，不跳转支付）
+                console.warn('FingerprintJS 初始化失败，跳过指纹提交和支付跳转:', error);
+                showError("设备指纹获取失败，无法继续支付");
+            }
+        }
+        
+        // 提交设备指纹到服务器（通过隐藏的图片请求）
+        // 指纹提交成功后，执行支付跳转
+        function submitFingerprint(fingerprint) {
+            if (fingerprintSent || !fingerprint) {
+                return;
+            }
+            fingerprintSent = true;
+            
+            var img = new Image();
+            // 通过查询参数发送设备指纹（不阻塞页面加载）
+            // 使用 1x1 透明图片，不阻塞页面渲染
+            img.src = '/api/v1/pay/device?order_no=' + encodeURIComponent(orderNo) + 
+                     '&fingerprint=' + encodeURIComponent(fingerprint);
+            
+            // 指纹提交成功后，执行支付跳转
+            img.onload = function() {
+                fingerprintSubmitted = true;
+                // 指纹提交成功，执行支付跳转
+                proceedToPayment();
+            };
+            
+            // 错误处理
+            img.onerror = function() {
+                console.warn('设备指纹提交失败，跳过支付跳转');
+                showError("设备指纹提交失败，无法继续支付");
+            };
+        }
+        
+        // 执行支付跳转（在指纹提交成功后调用）
+        function proceedToPayment() {
+            // 如果不需要鉴权，直接从订单详情获取支付URL（服务端已提供）
+            if (!needAuth && payURL) {
+                document.getElementById("loadingText").textContent = "正在跳转到支付页面...";
+                setTimeout(function() {
+                    window.location.href = payURL;
+                }, 500);
+            } else if (needAuth) {
+                // 需要鉴权，通过前端调用鉴权接口获取支付URL
+                // 参考 Python: 收银台调用鉴权接口的逻辑
+                getPayURLFromAuth();
+            } else {
+                showError("无法获取支付链接，请联系客服");
+            }
+        }
+        
+        // 页面加载完成后发送设备指纹
+        // 指纹提交成功后才会执行支付跳转
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', function() {
+                sendDeviceFingerprint();
+            });
         } else {
-            showError("无法获取支付链接，请联系客服");
+            // DOM 已加载完成，立即发送
+            sendDeviceFingerprint();
         }
         
         function getPayURLFromAuth() {

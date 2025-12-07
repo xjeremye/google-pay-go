@@ -849,47 +849,36 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		go s.invalidateTenantBalanceCache(context.Background(), orderCtx.TenantID)
 	}
 
-	// 异步创建订单日志（不阻塞主流程）
-	go s.createOrderLog(context.Background(), orderCtx)
+	// 注意：订单日志由 Controller 层创建（包含响应信息）
+	// 这里不再创建，避免重复
 
 	return orderDetail.ID, nil
 }
 
 // createOrderLog 创建订单日志
-// 参考 Python: update_or_create_order_log(ctx.out_order_no, ctx.sign_raw, ctx.sign)
-// 注意：Python 代码中只传入了 out_order_no, sign_raw, sign 三个参数
-// 但根据数据库表结构，还需要记录 request_body, request_method 等字段
-// 这些字段应该在 Controller 层传入，这里使用 orderCtx 中的信息
+// 参考 Python: 只创建 order_log，不更新
+// 重要：订单事务成功后异步创建 order_log（只包含请求信息）
+// 注意：响应信息由 Controller 层在创建时一并写入，所以这里只创建包含请求信息的日志
+// 如果订单事务失败，此方法不会被调用，因此不需要检查订单是否存在
 func (s *OrderService) createOrderLog(ctx context.Context, orderCtx *OrderCreateContext) {
 	if orderCtx.OutOrderNo == "" {
 		return
 	}
 
+	// 创建 order_log（只创建，不更新，只包含请求信息）
+	// 不需要检查订单是否存在，因为只有在事务成功后才调用此方法
 	now := time.Now()
+	orderLog := &models.OrderLog{
+		OutOrderNo:     orderCtx.OutOrderNo,
+		SignRaw:        orderCtx.SignRaw,
+		Sign:           orderCtx.Sign,
+		RequestBody:    orderCtx.RequestBody,
+		RequestMethod:  orderCtx.RequestMethod,
+		CreateDatetime: &now,
+	}
 
-	// 优化：使用 MySQL 的 INSERT ... ON DUPLICATE KEY UPDATE 实现 UPSERT
-	// 减少一次查询，提高性能（out_order_no 有唯一索引）
-	// 如果记录已存在，更新字段（但不覆盖响应信息）；如果不存在，创建新记录
-	// 使用原生 SQL 实现 UPSERT（MySQL 的 INSERT ... ON DUPLICATE KEY UPDATE）
-	// 如果已有响应信息，不更新 create_datetime
-	sql := `INSERT INTO dvadmin_order_log (out_order_no, sign_raw, sign, request_body, request_method, create_datetime)
-			VALUES (?, ?, ?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				sign_raw = VALUES(sign_raw),
-				sign = VALUES(sign),
-				request_body = VALUES(request_body),
-				request_method = VALUES(request_method),
-				create_datetime = IF(json_result = '' AND response_code = '', VALUES(create_datetime), create_datetime)`
-
-	if err := database.DB.Exec(sql,
-		orderCtx.OutOrderNo,
-		orderCtx.SignRaw,
-		orderCtx.Sign,
-		orderCtx.RequestBody,
-		orderCtx.RequestMethod,
-		&now,
-	).Error; err != nil {
-		logger.Logger.Warn("创建/更新订单日志失败",
+	if err := database.DB.Create(orderLog).Error; err != nil {
+		logger.Logger.Warn("创建订单日志失败",
 			zap.String("out_order_no", orderCtx.OutOrderNo),
 			zap.Error(err))
 	}

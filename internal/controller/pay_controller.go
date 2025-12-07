@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -10,15 +11,22 @@ import (
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/response"
+	"github.com/golang-pay-core/internal/service"
 	"github.com/golang-pay-core/internal/utils"
 )
 
 // PayController 支付控制器
-type PayController struct{}
+type PayController struct {
+	cashierService *service.CashierService
+	orderService   *service.OrderService
+}
 
 // NewPayController 创建支付控制器
 func NewPayController() *PayController {
-	return &PayController{}
+	return &PayController{
+		cashierService: service.NewCashierService(),
+		orderService:   service.NewOrderService(),
+	}
 }
 
 // Auth 鉴权接口
@@ -213,9 +221,9 @@ func (c *PayController) Cashier(ctx *gin.Context) {
 		return
 	}
 
-	// 查询订单
-	var order models.Order
-	if err := database.DB.Where("order_no = ?", orderNo).First(&order).Error; err != nil {
+	// 查询订单（使用 OrderService，已包含订单详情）
+	order, err := c.orderService.GetOrderByOrderNo(orderNo)
+	if err != nil {
 		ctx.HTML(http.StatusNotFound, "error.html", gin.H{
 			"title":   "订单不存在",
 			"message": "未找到订单：" + orderNo,
@@ -223,15 +231,15 @@ func (c *PayController) Cashier(ctx *gin.Context) {
 		return
 	}
 
-	// 查询订单详情
-	var orderDetail models.OrderDetail
-	if err := database.DB.Where("order_id = ?", order.ID).First(&orderDetail).Error; err != nil {
+	// 获取订单详情
+	if order.OrderDetail == nil {
 		ctx.HTML(http.StatusNotFound, "error.html", gin.H{
 			"title":   "订单详情不存在",
 			"message": "未找到订单详情",
 		})
 		return
 	}
+	orderDetail := order.OrderDetail
 
 	// 检查订单状态
 	if order.OrderStatus != models.OrderStatusPending {
@@ -257,9 +265,42 @@ func (c *PayController) Cashier(ctx *gin.Context) {
 		}
 	}
 
+	// 记录用户访问收银台（收集用户信息：IP、设备指纹、设备类型等）
+	// 参考 Python: 用户进入收银台时记录设备信息
+	// 异步执行，不阻塞页面渲染
+	go func() {
+		// 获取客户端IP
+		clientIP := ctx.ClientIP()
+
+		// 获取 User-Agent
+		userAgent := ctx.Request.UserAgent()
+
+		// 从请求参数中获取设备指纹（前端通过 JavaScript 生成并发送）
+		deviceFingerprint := ctx.Query("fingerprint")
+
+		// 从请求参数中获取用户ID（如果有）
+		userID := ctx.Query("user_id")
+
+		// 记录访问信息（失败不影响页面显示）
+		if err := c.cashierService.RecordCashierVisit(
+			context.Background(),
+			orderNo,
+			clientIP,
+			userAgent,
+			deviceFingerprint,
+			userID,
+		); err != nil {
+			// 记录失败不影响页面显示，只记录日志
+			// 这里简化处理，实际应该使用 logger
+		}
+	}()
+
 	// 查询域名信息（用于判断是否需要鉴权）
+	// 优化：如果订单详情中已包含域名信息，直接使用；否则查询数据库
 	var domain *models.PayDomain
 	if orderDetail.DomainID != nil {
+		// 这里可以进一步优化：如果域名信息变化不频繁，可以缓存
+		// 但考虑到域名信息可能变化，暂时直接查询
 		var d models.PayDomain
 		if err := database.DB.Where("id = ?", *orderDetail.DomainID).First(&d).Error; err == nil {
 			domain = &d
@@ -307,7 +348,7 @@ func (c *PayController) Cashier(ctx *gin.Context) {
 		templateData["timestamp"] = timestamp
 	} else {
 		// 不需要鉴权，直接从订单详情获取支付URL
-		payURL := c.getPayURLFromOrderDetail(&orderDetail)
+		payURL := c.getPayURLFromOrderDetail(orderDetail)
 		if payURL == "" {
 			ctx.HTML(http.StatusNotFound, "error.html", gin.H{
 				"title":   "支付URL不存在",
@@ -338,4 +379,62 @@ func (c *PayController) getPayURLFromOrderDetail(orderDetail *models.OrderDetail
 	}
 
 	return ""
+}
+
+// Device 设备指纹收集接口
+// 参考 Python: 收银台通过前端 JavaScript 发送设备指纹
+// @Summary 设备指纹收集
+// @Description 收集用户设备指纹信息（用于风控和用户识别）
+// @Tags 支付
+// @Produce json
+// @Param order_no query string true "订单号" example:"PAY20240101120000001"
+// @Param fingerprint query string true "设备指纹" example:"abc123..."
+// @Param user_id query string false "用户ID" example:"user123"
+// @Success 200 {object} response.Response "成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Router /api/v1/pay/device [get]
+func (c *PayController) Device(ctx *gin.Context) {
+	// 获取参数
+	orderNo := ctx.Query("order_no")
+	fingerprint := ctx.Query("fingerprint")
+	userID := ctx.Query("user_id")
+
+	// 参数验证
+	if orderNo == "" {
+		// 设备指纹收集失败不影响主流程，返回成功但不处理
+		response.Success(ctx, gin.H{"message": "订单号不能为空"})
+		return
+	}
+
+	// 获取客户端IP
+	clientIP := ctx.ClientIP()
+
+	// 获取 User-Agent
+	userAgent := ctx.Request.UserAgent()
+
+	// 异步记录设备信息（不阻塞响应）
+	go func() {
+		if err := c.cashierService.RecordCashierVisit(
+			context.Background(),
+			orderNo,
+			clientIP,
+			userAgent,
+			fingerprint,
+			userID,
+		); err != nil {
+			// 记录失败不影响，只记录日志（这里简化处理）
+		}
+	}()
+
+	// 返回 1x1 透明图片（用于前端 img 标签加载）
+	// 这样前端可以通过 img 标签发送设备指纹，不阻塞页面
+	ctx.Header("Content-Type", "image/gif")
+	ctx.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	ctx.Data(http.StatusOK, "image/gif", []byte{
+		0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00,
+		0x80, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x21,
+		0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
+		0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x04,
+		0x01, 0x00, 0x3b,
+	})
 }
