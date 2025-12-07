@@ -56,7 +56,7 @@ func main() {
 			configPath = arg
 		}
 	}
-	
+
 	if err := config.Load(configPath); err != nil {
 		panic(fmt.Sprintf("加载配置失败: %v", err))
 	}
@@ -89,6 +89,11 @@ func main() {
 	refreshCtx := context.Background()
 	go cacheRefreshService.Start(refreshCtx)
 	logger.Logger.Info("缓存刷新服务已启动（每秒刷新一次热点数据）")
+
+	// 启动通知重试服务（每30秒检查一次失败的通知并重试）
+	notifyRetryService := service.NewNotifyRetryService()
+	go notifyRetryService.Start(refreshCtx)
+	logger.Logger.Info("通知重试服务已启动（每30秒检查一次失败的通知）")
 
 	// 设置路由
 	r := router.SetupRouter()

@@ -64,6 +64,12 @@ func SetupRouter() *gin.Engine {
 	// 收银台路由（不需要 /api/v1 前缀，参考 Python 代码）
 	r.GET("/cashier", payController.Cashier) // 收银台页面
 
+	// 回调相关路由
+	// 参考 Python: /api/pay/order/notify/{plugin_type}/{product_id}/
+	notifyController := controller.NewNotifyController()
+	r.POST("/api/pay/order/notify/:plugin_type/:product_id/", notifyController.AlipayNotify) // 支付宝回调（POST）
+	r.GET("/api/pay/order/notify/:plugin_type/:product_id/", notifyController.AlipayNotify)  // 支付宝回调（GET，兼容）
+
 	return r
 }
 
