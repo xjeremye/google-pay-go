@@ -389,10 +389,8 @@ func (c *Client) TradeWapPay(subject, outTradeNo, totalAmount, notifyURL string,
 	}
 
 	// 添加其他参数到 biz_content
-	if others != nil {
-		for k, v := range others {
-			bizContent[k] = v
-		}
+	for k, v := range others {
+		bizContent[k] = v
 	}
 
 	// 将 biz_content 转换为 JSON 字符串

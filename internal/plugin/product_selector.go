@@ -68,6 +68,8 @@ func getAlipayProduct(ctx context.Context, req *WaitProductRequest, writeoffIDs 
 
 	// 遍历产品，检查各种限制
 	todayTime := time.Now().Add(-5 * time.Minute)
+	today := time.Now().Format("2006-01-02")
+
 	for _, product := range products {
 		// 检查固定金额
 		// Python: Q(settled_moneys=[]) | Q(settled_moneys__contains=[money])
@@ -75,18 +77,20 @@ func getAlipayProduct(ctx context.Context, req *WaitProductRequest, writeoffIDs 
 			continue
 		}
 
-		// 检查限额（简化版，Python 有更复杂的逻辑）
+		// 检查日限额
 		if product.LimitMoney > 0 {
-			// TODO: 实现日限额检查（需要查询日统计表）
-			// Python: 检查当日已收款金额+五分钟内等待支付的订单总和是否超过限额
-			// 暂时跳过限额检查
+			// 检查当日已收款金额+五分钟内等待支付的订单总和是否超过限额
+			if !checkDailyLimit(ctx, product.ID, req.ChannelID, product.LimitMoney, money, todayTime) {
+				continue
+			}
 		}
 
-		// 检查日笔数限制（简化版）
+		// 检查日笔数限制
 		if product.DayCountLimit > 0 {
-			// TODO: 实现日笔数限制检查（需要 Redis 计数）
-			// Python: atomic_incr_decr_redis_count(success_key, 1, i['day_count_limit'], ex=3600 * 24)
-			// 暂时跳过日笔数限制检查
+			// 使用 Redis 原子计数检查日笔数限制
+			if !checkDailyCountLimit(ctx, product.ID, product.DayCountLimit, today) {
+				continue
+			}
 		}
 
 		// 应用浮动金额
@@ -101,7 +105,6 @@ func getAlipayProduct(ctx context.Context, req *WaitProductRequest, writeoffIDs 
 
 		// 返回第一个符合条件的产品
 		productIDStr := fmt.Sprintf("%d", product.ID)
-		_ = todayTime // 暂时未使用，后续实现日限额检查时会用到
 		return productIDStr, &product.WriteoffID, finalMoney, nil
 	}
 
@@ -135,4 +138,82 @@ func checkSettledMoneys(settledMoneys string, money int) bool {
 		}
 	}
 	return false
+}
+
+// checkDailyLimit 检查日限额
+// 参考 Python: 检查当日已收款金额+五分钟内等待支付的订单总和是否超过限额
+func checkDailyLimit(ctx context.Context, productID int64, channelID int64, limitMoney int, currentMoney int, sinceTime time.Time) bool {
+	// 1. 查询产品日统计表中的已收款金额
+	var productDay models.AlipayProductDay
+	today := time.Now().Format("2006-01-02")
+
+	var totalMoney int64 = 0
+
+	// 查询日统计表
+	if err := database.DB.Where("product_id = ? AND pay_channel_id = ? AND date = ?",
+		productID, channelID, today).
+		First(&productDay).Error; err == nil {
+		totalMoney = productDay.SuccessMoney
+	}
+
+	// 2. 查询5分钟内待支付订单的金额总和
+	var pendingMoney int64
+	database.DB.Table("dvadmin_order").
+		Joins("JOIN dvadmin_order_detail ON dvadmin_order.id = dvadmin_order_detail.order_id").
+		Where("dvadmin_order_detail.product_id = ?", fmt.Sprintf("%d", productID)).
+		Where("dvadmin_order.order_status = ?", models.OrderStatusPending).
+		Where("dvadmin_order.create_datetime >= ?", sinceTime).
+		Select("COALESCE(SUM(dvadmin_order.money), 0)").
+		Scan(&pendingMoney)
+
+	// 3. 检查是否超过限额
+	totalMoney += pendingMoney + int64(currentMoney)
+	return totalMoney <= int64(limitMoney)
+}
+
+// checkDailyCountLimit 检查日笔数限制
+// 参考 Python: atomic_incr_decr_redis_count(success_key, 1, i['day_count_limit'], ex=3600 * 24)
+func checkDailyCountLimit(ctx context.Context, productID int64, dayCountLimit int, date string) bool {
+	// Redis key 格式：product:day_count:{product_id}:{date}
+	redisKey := fmt.Sprintf("product:day_count:%d:%s", productID, date)
+
+	// 使用 Redis 原子操作检查计数
+	rdb := database.RDB
+
+	// 先获取当前计数（如果 key 不存在，返回 0）
+	currentCount, err := rdb.Get(ctx, redisKey).Int()
+	if err != nil {
+		// 如果 key 不存在（redis: nil），这是正常的，计数为 0
+		// 检查错误信息是否包含 "nil"（表示 key 不存在）
+		if err.Error() == "redis: nil" {
+			currentCount = 0
+		} else {
+			// Redis 其他错误，允许通过（容错处理）
+			return true
+		}
+	}
+
+	// 如果当前计数已经达到或超过限制，不允许
+	if currentCount >= dayCountLimit {
+		return false
+	}
+
+	// 原子递增并检查是否超过限制
+	// 使用 INCR 命令，如果结果超过限制则回退
+	newCount, err := rdb.Incr(ctx, redisKey).Result()
+	if err != nil {
+		// Redis 错误，允许通过（容错处理）
+		return true
+	}
+
+	// 设置过期时间（24小时）
+	rdb.Expire(ctx, redisKey, 24*time.Hour)
+
+	// 如果递增后超过限制，回退并拒绝
+	if newCount > int64(dayCountLimit) {
+		rdb.Decr(ctx, redisKey)
+		return false
+	}
+
+	return true
 }
