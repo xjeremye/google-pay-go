@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // combineValues 组合参数值，移除 sign 字段，按 key 排序，拼接成 key=value 格式，最后加上 key={key}
@@ -131,3 +132,31 @@ func GenerateResponseSign(data map[string]interface{}, key string, compatible in
 	return sign
 }
 
+// GetAuthKey 生成鉴权密钥
+// 参考 Python: def get_auth_key(raw, p_key, offset=30):
+// raw: 原始数据（订单号或域名URL）
+// p_key: 域名的密钥
+// offset: 时间偏移量（秒），默认30秒
+// 返回: 动态生成的鉴权密钥
+func GetAuthKey(raw, pKey string, offset int) string {
+	if offset <= 0 {
+		offset = 30 // 默认30秒
+	}
+
+	// 获取当前时间戳，除以 offset 得到时间窗口
+	timestamp := time.Now().Unix()
+	timeWindow := timestamp / int64(offset)
+
+	return GetAuthKeyWithTimeWindow(raw, pKey, timeWindow)
+}
+
+// GetAuthKeyWithTimeWindow 使用指定的时间窗口生成鉴权密钥
+// 用于验证时检查前一个时间窗口的密钥
+func GetAuthKeyWithTimeWindow(raw, pKey string, timeWindow int64) string {
+	// 组合原始数据、密钥和时间窗口
+	// Python: 可能是 raw + p_key + str(time_window) 的组合
+	rawData := fmt.Sprintf("%s%s%d", raw, pKey, timeWindow)
+
+	// 使用 MD5 生成鉴权密钥
+	return md5Encryption(rawData)
+}

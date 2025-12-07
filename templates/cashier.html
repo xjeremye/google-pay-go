@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.title}} - 订单号：{{.order_no}}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }
+        .logo {
+            font-size: 32px;
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+        .order-info {
+            margin: 30px 0;
+        }
+        .order-no {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .amount {
+            font-size: 36px;
+            font-weight: bold;
+            color: #667eea;
+            margin: 20px 0;
+        }
+        .amount-label {
+            font-size: 14px;
+            color: #999;
+            margin-bottom: 5px;
+        }
+        .loading {
+            margin: 30px 0;
+        }
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .loading-text {
+            margin-top: 15px;
+            color: #666;
+            font-size: 14px;
+        }
+        .pay-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            font-size: 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .pay-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        .pay-button:active {
+            transform: translateY(0);
+        }
+        .footer {
+            margin-top: 30px;
+            font-size: 12px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">💳 收银台</div>
+        <div class="order-info">
+            <div class="order-no">订单号：{{.order_no}}</div>
+            <div class="amount-label">支付金额</div>
+            <div class="amount">¥{{printf "%.2f" .amount}}</div>
+        </div>
+        <div class="loading">
+            <div class="spinner"></div>
+            <div class="loading-text">正在跳转到支付页面...</div>
+        </div>
+        <button class="pay-button" onclick="window.location.href='{{.pay_url}}'">立即支付</button>
+        <div class="footer">
+            <p>如未自动跳转，请点击上方按钮</p>
+        </div>
+    </div>
+    <script>
+        // 自动跳转到支付URL
+        var payURL = "{{.pay_url}}";
+        if (payURL) {
+            // 延迟1秒后自动跳转
+            setTimeout(function() {
+                window.location.href = payURL;
+            }, 1000);
+        }
+    </script>
+</body>
+</html>

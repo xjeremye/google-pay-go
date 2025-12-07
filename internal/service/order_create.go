@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -246,11 +247,18 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 		return nil, err
 	}
 
+	// 10. 生成鉴权链接并返回收银台地址（如果需要）
+	// 参考 Python: get_auth_url 方法
+	finalURL, err := s.getAuthURL(ctx, orderCtx, payURL)
+	if err != nil {
+		return nil, err
+	}
+
 	// 7. 设置缓存
 	s.setCache(ctx, orderCtx)
 
 	// 8. 构建响应
-	response := s.buildResponse(orderCtx, payURL)
+	response := s.buildResponse(orderCtx, finalURL)
 
 	// 记录耗时
 	elapsed := time.Since(startTime)
@@ -820,6 +828,114 @@ func (s *OrderService) generatePayURL(ctx context.Context, orderCtx *OrderCreate
 	}
 
 	return createResp.PayURL, nil
+}
+
+// getAuthURL 生成鉴权链接并返回收银台地址
+// 参考 Python: get_auth_url 方法
+// 如果域名需要鉴权，生成鉴权链接并返回收银台地址；否则直接返回支付URL
+func (s *OrderService) getAuthURL(ctx context.Context, orderCtx *OrderCreateContext, payURL string) (string, *OrderError) {
+	// 检查域名是否需要鉴权
+	if orderCtx.Domain == nil || !orderCtx.Domain.AuthStatus || orderCtx.Domain.AuthKey == "" {
+		// 不需要鉴权，直接返回支付URL
+		return payURL, nil
+	}
+
+	// 将支付URL存储到订单详情的 Extra 字段中（收银台需要获取）
+	if err := s.storePayURLToOrderDetail(ctx, orderCtx.OrderID, payURL); err != nil {
+		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("存储支付URL失败: %v", err))
+	}
+
+	// 生成鉴权链接并返回收银台地址
+	// 注意：这里传入的是域名的密钥（p_key），不是动态生成的 auth_key
+	cashierURL, err := s.generateAuthURLAndCashier(orderCtx.DomainURL, orderCtx.OrderNo, orderCtx.Domain.AuthKey, orderCtx.Domain.AuthTimeout, payURL)
+	if err != nil {
+		return "", NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("生成鉴权链接失败: %v", err))
+	}
+
+	return cashierURL, nil
+}
+
+// storePayURLToOrderDetail 将支付URL存储到订单详情的 Extra 字段中
+// 参考 Python: 存储支付URL以便收银台获取
+func (s *OrderService) storePayURLToOrderDetail(ctx context.Context, orderID string, payURL string) error {
+	// 获取订单详情
+	var orderDetail models.OrderDetail
+	if err := database.DB.Where("order_id = ?", orderID).First(&orderDetail).Error; err != nil {
+		return err
+	}
+
+	// 解析现有的 Extra 字段
+	extraMap := make(map[string]interface{})
+	if orderDetail.Extra != "" && orderDetail.Extra != "{}" {
+		if err := json.Unmarshal([]byte(orderDetail.Extra), &extraMap); err != nil {
+			// 如果解析失败，创建新的 map
+			extraMap = make(map[string]interface{})
+		}
+	}
+
+	// 添加支付URL到 Extra
+	extraMap["pay_url"] = payURL
+
+	// 序列化并更新
+	extraJSON, err := json.Marshal(extraMap)
+	if err != nil {
+		return err
+	}
+
+	// 更新订单详情
+	return database.DB.Model(&orderDetail).Update("extra", string(extraJSON)).Error
+}
+
+// generateAuthURLAndCashier 生成鉴权链接并返回收银台地址
+// 参考 Python: 生成鉴权链接，格式为 {domain_url}/api/pay/auth?order_no={order_no}&auth_key={auth_key}&timestamp={timestamp}&sign={sign}
+// 返回收银台地址，格式为 {domain_url}/cashier?order_no={order_no}
+func (s *OrderService) generateAuthURLAndCashier(domainURL, orderNo, pKey string, authTimeout int, payURL string) (string, error) {
+	// 生成时间戳
+	timestamp := time.Now().Unix()
+
+	// 使用 get_auth_key 方法生成动态鉴权密钥
+	// 参考 Python: get_auth_key(raw, p_key, offset=30)
+	// raw 使用订单号，p_key 使用域名的密钥，offset 默认30秒
+	authKey := utils.GetAuthKey(orderNo, pKey, 30)
+
+	// 构建鉴权参数
+	authParams := map[string]interface{}{
+		"order_no":  orderNo,
+		"auth_key":  authKey,
+		"timestamp": timestamp,
+		"pay_url":   payURL, // 将支付URL作为参数传递
+	}
+
+	// 生成签名（使用 MD5）
+	// 参考 Python: 按 key 排序，拼接成 key=value&key=value 格式，最后加上 &key={auth_key}，然后 MD5
+	signData := make(map[string]interface{})
+	for k, v := range authParams {
+		if k != "sign" {
+			signData[k] = v
+		}
+	}
+
+	// 生成签名（使用 utils 的签名方法）
+	_, sign := utils.GetSign(signData, authKey, nil, nil, 0)
+
+	// 构建鉴权URL（用于验证，但不需要返回）
+	// 格式：{domain_url}/api/pay/auth?order_no={order_no}&auth_key={auth_key}&timestamp={timestamp}&pay_url={pay_url}&sign={sign}
+	// 注意：鉴权URL由收银台调用，这里只生成但不返回
+	// 使用 url.QueryEscape 对 pay_url 进行编码
+	_ = fmt.Sprintf("%s/api/pay/auth?order_no=%s&auth_key=%s&timestamp=%d&pay_url=%s&sign=%s",
+		domainURL, orderNo, authKey, timestamp, url.QueryEscape(payURL), sign)
+
+	// 返回收银台地址（格式：{domain_url}/cashier?order_no={order_no}）
+	// 参考 Python: 收银台地址格式
+	cashierURL := fmt.Sprintf("%s/cashier?order_no=%s", domainURL, orderNo)
+
+	// 如果 auth_timeout > 0，添加过期时间参数
+	if authTimeout > 0 {
+		expireTime := timestamp + int64(authTimeout)
+		cashierURL = fmt.Sprintf("%s&expire_time=%d", cashierURL, expireTime)
+	}
+
+	return cashierURL, nil
 }
 
 // setCache 设置缓存

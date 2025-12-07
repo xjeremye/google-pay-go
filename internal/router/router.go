@@ -17,6 +17,9 @@ func SetupRouter() *gin.Engine {
 
 	r := gin.New()
 
+	// 加载HTML模板
+	r.LoadHTMLGlob("templates/*")
+
 	// 全局中间件
 	r.Use(middleware.Logger())
 	r.Use(middleware.Recovery())
@@ -49,6 +52,16 @@ func SetupRouter() *gin.Engine {
 			orders.GET("/query", orderController.QueryOrder)   // 查询订单
 		}
 	}
+
+	// 支付相关路由
+	payController := controller.NewPayController()
+	pay := r.Group("/api/v1/pay")
+	{
+		pay.GET("/auth", payController.Auth) // 鉴权接口
+	}
+
+	// 收银台路由（不需要 /api/v1 前缀，参考 Python 代码）
+	r.GET("/cashier", payController.Cashier) // 收银台页面
 
 	return r
 }

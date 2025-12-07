@@ -128,6 +128,7 @@ func (p *AlipayPhonePlugin) generatePayURL(ctx context.Context, req *CreateOrder
 		return "", err
 	}
 
+	// 直接返回支付URL，鉴权逻辑由订单服务统一处理
 	return payURL, nil
 }
 
