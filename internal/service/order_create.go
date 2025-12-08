@@ -362,6 +362,20 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 	// 这里保留作为备用，但主要逻辑应该在 Controller 层
 	// s.updateOrderLogResponse(ctx, orderCtx, response)
 
+	// 11. 异步调用 callback_submit（下单回调）
+	// 参考 Python: notify_order_submit 通过调度器异步调用
+	// 延迟 500 微秒执行，确保订单数据已完全写入
+	go func() {
+		// 延迟执行，确保订单数据已完全写入
+		time.Sleep(500 * time.Microsecond)
+		if err := s.callbackPluginSubmit(context.Background(), orderCtx); err != nil {
+			logger.Logger.Error("插件 callback_submit 触发错误",
+				zap.String("order_no", orderCtx.OrderNo),
+				zap.String("plugin_type", orderCtx.PluginType),
+				zap.Error(err))
+		}
+	}()
+
 	return response, nil
 }
 
@@ -1342,6 +1356,52 @@ func (s *OrderService) GetOrderByOutOrderNo(outOrderNo string, merchantID int64)
 	}
 
 	return &order, nil
+}
+
+// callbackPluginSubmit 调用插件的 callback_submit 方法
+// 参考 Python: callback_plugin_submit 函数
+func (s *OrderService) callbackPluginSubmit(ctx context.Context, orderCtx *OrderCreateContext) error {
+	// 获取插件实例
+	pluginInstance, err := s.pluginManager.GetPluginByCtx(ctx, orderCtx)
+	if err != nil {
+		return fmt.Errorf("获取插件实例失败: %w", err)
+	}
+
+	// 查询订单创建时间（如果订单已创建）
+	createDatetimeStr := time.Now().Format("2006-01-02 15:04:05")
+	if orderCtx.OrderID != "" {
+		var order models.Order
+		if err := database.DB.Select("create_datetime").Where("id = ?", orderCtx.OrderID).First(&order).Error; err == nil {
+			if order.CreateDatetime != nil {
+				createDatetimeStr = order.CreateDatetime.Format("2006-01-02 15:04:05")
+			}
+		}
+	}
+
+	// 构建回调请求
+	callbackReq := &plugin.CallbackSubmitRequest{
+		OrderNo:        orderCtx.OrderNo,
+		OutOrderNo:     orderCtx.OutOrderNo,
+		PluginID:       orderCtx.PluginID,
+		Tax:            orderCtx.Tax,
+		PluginType:     orderCtx.PluginType,
+		Money:          orderCtx.Money,
+		DomainID:       orderCtx.DomainID,
+		NotifyMoney:    orderCtx.NotifyMoney,
+		OrderID:        orderCtx.OrderID,
+		ProductID:      orderCtx.ProductID,
+		CookieID:       orderCtx.CookieID,
+		ChannelID:      orderCtx.ChannelID,
+		MerchantID:     orderCtx.MerchantID,
+		WriteoffID:     orderCtx.WriteoffID,
+		TenantID:       orderCtx.TenantID,
+		CreateDatetime: createDatetimeStr,
+		NotifyURL:      orderCtx.NotifyURL,
+		PluginUpstream: orderCtx.PluginUpstream,
+	}
+
+	// 调用插件的 callback_submit 方法
+	return pluginInstance.CallbackSubmit(ctx, callbackReq)
 }
 
 // UpdateOrderStatus 更新订单状态，并处理预占余额和余额扣减

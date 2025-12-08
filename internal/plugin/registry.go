@@ -26,7 +26,7 @@ func GetRegistry() *Registry {
 		globalRegistry = &Registry{
 			factories: make(map[string]PluginFactory),
 		}
-		// 注册默认的基础插件
+		// 注册默认的基础插件（通用实现，不包含任何第三方支付平台特定逻辑）
 		globalRegistry.Register("default", func(ctx context.Context, pluginID int64, pluginType string) (Plugin, error) {
 			return NewBasePlugin(pluginID), nil
 		})
@@ -45,7 +45,7 @@ func (r *Registry) Register(pluginType string, factory PluginFactory) {
 func (r *Registry) GetFactory(pluginType string) (PluginFactory, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	
+
 	factory, ok := r.factories[pluginType]
 	if !ok {
 		// 如果没有找到，返回默认工厂
@@ -61,7 +61,7 @@ func (r *Registry) GetFactory(pluginType string) (PluginFactory, error) {
 func (r *Registry) ListRegistered() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	
+
 	types := make([]string, 0, len(r.factories))
 	for t := range r.factories {
 		if t != "default" {
@@ -70,4 +70,3 @@ func (r *Registry) ListRegistered() []string {
 	}
 	return types
 }
-

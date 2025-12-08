@@ -1,4 +1,4 @@
-package plugin
+package alipay
 
 import (
 	"context"
@@ -9,12 +9,13 @@ import (
 
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/models"
+	"github.com/golang-pay-core/internal/plugin"
 )
 
 // getAlipayProduct 获取支付宝产品
 // 参考 Python: AlipayFacePluginResponder.get_writeoff_product
 // 在商户所属的码商(writeoff)下获取 alipay product 中所有可用的随机一个
-func getAlipayProduct(ctx context.Context, req *WaitProductRequest, writeoffIDs []int64) (string, *int64, int, error) {
+func getAlipayProduct(ctx context.Context, req *plugin.WaitProductRequest, writeoffIDs []int64) (string, *int64, int, error) {
 	// 构建查询条件
 	// Python: AlipayProduct.objects.filter(
 	//     Q(max_money=0, min_money=0) |

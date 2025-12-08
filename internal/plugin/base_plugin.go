@@ -5,7 +5,9 @@ import (
 	"fmt"
 )
 
-// BasePlugin 基础插件实现（示例）
+// BasePlugin 基础插件实现（所有插件的基类）
+// 提供通用的插件功能，不包含任何第三方支付平台特定的逻辑
+// 第三方支付平台（支付宝、微信、京东等）的插件应该继承或嵌入此基类
 type BasePlugin struct {
 	pluginID int64
 }
@@ -17,14 +19,33 @@ func NewBasePlugin(pluginID int64) *BasePlugin {
 	}
 }
 
-// CreateOrder 创建订单
+// GetPluginID 获取插件ID
+func (p *BasePlugin) GetPluginID() int64 {
+	return p.pluginID
+}
+
+// CreateOrder 创建订单（基础实现）
+// 子类应该覆盖此方法以实现具体的支付逻辑
 func (p *BasePlugin) CreateOrder(ctx context.Context, req *CreateOrderRequest) (*CreateOrderResponse, error) {
 	// 基础实现：生成一个占位符支付URL
 	// 实际实现应该根据插件类型调用对应的支付接口
-
 	payURL := fmt.Sprintf("https://pay.example.com/pay?order_no=%s&plugin_id=%d", req.OrderNo, req.PluginID)
-
 	return NewSuccessResponse(payURL), nil
+}
+
+// WaitProduct 等待产品（基础实现）
+// 子类应该覆盖此方法以实现具体的产品选择逻辑
+func (p *BasePlugin) WaitProduct(ctx context.Context, req *WaitProductRequest) (*WaitProductResponse, error) {
+	// 基础实现：返回错误，提示子类需要实现
+	return NewWaitProductErrorResponse(7318, "WaitProduct 方法需要由子类实现"), nil
+}
+
+// CallbackSubmit 下单回调（基础实现）
+// 子类应该覆盖此方法以实现具体的回调逻辑
+func (p *BasePlugin) CallbackSubmit(ctx context.Context, req *CallbackSubmitRequest) error {
+	// 基础实现：什么都不做
+	// 子类可以覆盖此方法以实现统计更新等逻辑
+	return nil
 }
 
 // 实现 PluginCapabilities 接口（可选）
@@ -54,32 +75,4 @@ func (p *BasePlugin) ExtraNeedCookie() bool {
 func (p *BasePlugin) GetTimeout(ctx context.Context, pluginID int64) int {
 	// 默认5分钟
 	return 300
-}
-
-// WaitProduct 等待产品（基础实现）
-// 参考 Python: BasePluginResponder.wait_product
-// 通用实现：获取支付宝产品（适用于继承 BasePlugin 的支付宝插件）
-// 如果插件需要自定义逻辑，可以覆盖此方法
-func (p *BasePlugin) WaitProduct(ctx context.Context, req *WaitProductRequest) (*WaitProductResponse, error) {
-	// 获取可用的核销ID列表
-	writeoffIDs, err := getWriteoffIDsForPlugin(req.TenantID, req.Money, &req.ChannelID)
-	if err != nil {
-		return NewWaitProductErrorResponse(7318, fmt.Sprintf("获取核销ID失败: %v", err)), nil
-	}
-	if len(writeoffIDs) == 0 {
-		return NewWaitProductErrorResponse(7318, "没有可选核销"), nil
-	}
-
-	// 获取产品（通用实现：支付宝产品）
-	productID, writeoffID, money, err := getAlipayProduct(ctx, req, writeoffIDs)
-	if err != nil {
-		return NewWaitProductErrorResponse(7318, fmt.Sprintf("获取产品失败: %v", err)), nil
-	}
-	if productID == "" {
-		return NewWaitProductErrorResponse(7318, "无货物库存"), nil
-	}
-	if writeoffID == nil {
-		return NewWaitProductErrorResponse(7318, "无核销库存"), nil
-	}
-	return NewWaitProductSuccessResponse(productID, writeoffID, "", money), nil
 }

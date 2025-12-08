@@ -49,10 +49,11 @@ func checkWriteoffBalance(ctx context.Context, redisClient *redis.Client, writeo
 	return balance >= amount, nil
 }
 
-// getWriteoffIDsForPlugin 获取可用的核销ID列表（供插件使用）
+// GetWriteoffIDsForPlugin 获取可用的核销ID列表（供插件使用）
 // 参考 Python: get_writeoff_ids(tenant_id, money, pay_channel_id=None)
 // 使用 Redis 检查码商余额，提高性能
-func getWriteoffIDsForPlugin(tenantID int64, money int, payChannelID *int64) ([]int64, error) {
+// 导出此函数以便其他包（如 alipay）使用
+func GetWriteoffIDsForPlugin(tenantID int64, money int, payChannelID *int64) ([]int64, error) {
 	ctx := context.Background()
 	redisClient := database.RDB
 

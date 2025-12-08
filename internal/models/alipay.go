@@ -28,17 +28,17 @@ type AlipayProduct struct {
 	ParentID        *int64     `gorm:"index;comment:父产品ID" json:"parent_id,omitempty"`
 	CreateDatetime  *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
 	UpdateDatetime  *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
-	
+
 	// 产品限制相关字段
-	LimitMoney      int    `gorm:"not null;default:0;comment:限额" json:"limit_money"`
-	MaxMoney        int    `gorm:"not null;default:0;comment:最大金额" json:"max_money"`
-	MinMoney        int    `gorm:"not null;default:0;comment:最小金额" json:"min_money"`
-	FloatMaxMoney   int    `gorm:"not null;default:0;comment:浮动最大金额" json:"float_max_money"`
-	FloatMinMoney   int    `gorm:"not null;default:0;comment:浮动最小金额" json:"float_min_money"`
-	CanPay          bool   `gorm:"not null;default:1;comment:是否允许进单" json:"can_pay"`
-	SettledMoneys   string `gorm:"type:json;default:'[]';comment:固定金额列表" json:"settled_moneys,omitempty"`
-	DayCountLimit   int    `gorm:"not null;default:0;comment:日笔数限制" json:"day_count_limit"`
-	WriteoffID      int64  `gorm:"index;not null;comment:关联核销" json:"writeoff_id"`
+	LimitMoney    int    `gorm:"not null;default:0;comment:限额" json:"limit_money"`
+	MaxMoney      int    `gorm:"not null;default:0;comment:最大金额" json:"max_money"`
+	MinMoney      int    `gorm:"not null;default:0;comment:最小金额" json:"min_money"`
+	FloatMaxMoney int    `gorm:"not null;default:0;comment:浮动最大金额" json:"float_max_money"`
+	FloatMinMoney int    `gorm:"not null;default:0;comment:浮动最小金额" json:"float_min_money"`
+	CanPay        bool   `gorm:"not null;default:1;comment:是否允许进单" json:"can_pay"`
+	SettledMoneys string `gorm:"type:json;default:'[]';comment:固定金额列表" json:"settled_moneys,omitempty"`
+	DayCountLimit int    `gorm:"not null;default:0;comment:日笔数限制" json:"day_count_limit"`
+	WriteoffID    int64  `gorm:"index;not null;comment:关联核销" json:"writeoff_id"`
 
 	// 关联关系
 	Parent   *AlipayProduct `gorm:"foreignKey:ParentID" json:"parent,omitempty"`
@@ -50,3 +50,40 @@ func (AlipayProduct) TableName() string {
 	return "dvadmin_alipay_product"
 }
 
+// AlipayPublicPool 支付宝公池模型
+type AlipayPublicPool struct {
+	ID             int64      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Remarks        string     `gorm:"type:varchar(255);comment:备注" json:"remarks,omitempty"`
+	Modifier       string     `gorm:"type:varchar(255);comment:修改人" json:"modifier,omitempty"`
+	UpdateDatetime *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
+	CreateDatetime *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
+	Status         bool       `gorm:"not null;default:1;comment:状态" json:"status"`
+	IsDelete       bool       `gorm:"not null;default:0;comment:软删除" json:"is_delete"`
+	AlipayID       int64      `gorm:"index;not null;comment:支付宝主体" json:"alipay_id"`
+	CreatorID      *int64     `gorm:"index;comment:创建人" json:"creator_id,omitempty"`
+}
+
+// TableName 指定表名
+func (AlipayPublicPool) TableName() string {
+	return "dvadmin_alipay_public_pool"
+}
+
+// AlipayShenma 支付宝神码模型
+type AlipayShenma struct {
+	ID             int64      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Remarks        string     `gorm:"type:varchar(255);comment:备注" json:"remarks,omitempty"`
+	Modifier       string     `gorm:"type:varchar(255);comment:修改人" json:"modifier,omitempty"`
+	UpdateDatetime *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
+	CreateDatetime *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
+	Status         bool       `gorm:"not null;default:1;comment:状态" json:"status"`
+	LimitMoney     int        `gorm:"not null;default:0;comment:日限额" json:"limit_money"`
+	Ver            int64      `gorm:"not null;comment:版本号" json:"ver"`
+	AlipayID       int64      `gorm:"index;not null;comment:父级" json:"alipay_id"`
+	CreatorID      *int64     `gorm:"index;comment:创建人" json:"creator_id,omitempty"`
+	TenantID       int64      `gorm:"index;not null;comment:共享租户" json:"tenant_id"`
+}
+
+// TableName 指定表名
+func (AlipayShenma) TableName() string {
+	return "dvadmin_alipay_shenma"
+}

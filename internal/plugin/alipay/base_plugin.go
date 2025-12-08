@@ -1,0 +1,130 @@
+package alipay
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/logger"
+	"github.com/golang-pay-core/internal/models"
+	"github.com/golang-pay-core/internal/plugin"
+	"go.uber.org/zap"
+)
+
+// BasePlugin 支付宝基础插件
+// 继承自 plugin.BasePlugin，提供支付宝插件通用的功能
+// 所有支付宝相关的插件（PhonePlugin、WapPlugin 等）应该继承或嵌入此插件
+type BasePlugin struct {
+	*plugin.BasePlugin // 嵌入 plugin.BasePlugin，继承通用功能
+}
+
+// NewBasePlugin 创建支付宝基础插件
+func NewBasePlugin(pluginID int64) *BasePlugin {
+	return &BasePlugin{
+		BasePlugin: plugin.NewBasePlugin(pluginID),
+	}
+}
+
+// WaitProduct 等待产品（支付宝通用实现）
+// 参考 Python: BasePluginResponder.wait_product
+// 通用实现：获取支付宝产品（适用于所有支付宝插件）
+// 如果插件需要自定义逻辑，可以覆盖此方法
+func (p *BasePlugin) WaitProduct(ctx context.Context, req *plugin.WaitProductRequest) (*plugin.WaitProductResponse, error) {
+	// 获取可用的核销ID列表
+	writeoffIDs, err := plugin.GetWriteoffIDsForPlugin(req.TenantID, req.Money, &req.ChannelID)
+	if err != nil {
+		return plugin.NewWaitProductErrorResponse(7318, fmt.Sprintf("获取核销ID失败: %v", err)), nil
+	}
+	if len(writeoffIDs) == 0 {
+		return plugin.NewWaitProductErrorResponse(7318, "没有可选核销"), nil
+	}
+
+	// 获取产品（通用实现：支付宝产品）
+	productID, writeoffID, money, err := getAlipayProduct(ctx, req, writeoffIDs)
+	if err != nil {
+		return plugin.NewWaitProductErrorResponse(7318, fmt.Sprintf("获取产品失败: %v", err)), nil
+	}
+	if productID == "" {
+		return plugin.NewWaitProductErrorResponse(7318, "无货物库存"), nil
+	}
+	if writeoffID == nil {
+		return plugin.NewWaitProductErrorResponse(7318, "无核销库存"), nil
+	}
+	return plugin.NewWaitProductSuccessResponse(productID, writeoffID, "", money), nil
+}
+
+// CallbackSubmit 下单回调（订单创建成功后调用）
+// 参考 Python: BasePluginResponder.callback_submit
+// 支付宝通用实现：更新订单备注和日统计
+func (p *BasePlugin) CallbackSubmit(ctx context.Context, req *plugin.CallbackSubmitRequest) error {
+	// 1. 更新订单备注（产品名称）
+	if req.ProductID != "" {
+		productIDInt, err := parseProductIDInt(req.ProductID)
+		if err == nil {
+			var product models.AlipayProduct
+			if err := database.DB.Select("name").Where("id = ?", productIDInt).First(&product).Error; err == nil {
+				// 更新订单备注
+				if err := database.DB.Model(&models.Order{}).
+					Where("order_no = ?", req.OrderNo).
+					Update("remarks", product.Name).Error; err != nil {
+					logger.Logger.Warn("更新订单备注失败",
+						zap.String("order_no", req.OrderNo),
+						zap.Error(err))
+				}
+			}
+		}
+	}
+
+	// 2. 更新日统计
+	// 解析创建时间
+	createDatetime, err := time.Parse("2006-01-02 15:04:05", req.CreateDatetime)
+	if err != nil {
+		// 如果解析失败，尝试其他格式
+		createDatetime, err = time.Parse("2006-01-02T15:04:05Z07:00", req.CreateDatetime)
+		if err != nil {
+			// 如果还是失败，使用当前时间
+			createDatetime = time.Now()
+			logger.Logger.Warn("解析订单创建时间失败，使用当前时间",
+				zap.String("order_no", req.OrderNo),
+				zap.String("create_datetime", req.CreateDatetime),
+				zap.Error(err))
+		}
+	}
+
+	// 获取通道的 extra_arg
+	var extraArg *int
+	if req.ChannelID > 0 {
+		var channel models.PayChannel
+		if err := database.DB.Select("extra_arg").Where("id = ?", req.ChannelID).First(&channel).Error; err == nil {
+			extraArg = channel.ExtraArg
+		}
+	}
+
+	// 调用日统计服务
+	dayStatsService := NewDayStatisticsService()
+	if err := dayStatsService.SubmitBaseDayStatistics(ctx, req.ProductID, createDatetime, req.ChannelID, req.TenantID, extraArg); err != nil {
+		logger.Logger.Error("更新日统计失败",
+			zap.String("order_no", req.OrderNo),
+			zap.String("product_id", req.ProductID),
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Error(err))
+		// 不返回错误，避免影响主流程
+	}
+
+	return nil
+}
+
+// parseProductIDInt 解析产品ID（字符串转 int64）
+func parseProductIDInt(productID string) (int64, error) {
+	if productID == "" {
+		return 0, fmt.Errorf("产品ID不能为空")
+	}
+	// 尝试解析为 int64
+	var id int64
+	_, err := fmt.Sscanf(productID, "%d", &id)
+	if err != nil {
+		return 0, fmt.Errorf("产品ID格式错误: %w", err)
+	}
+	return id, nil
+}

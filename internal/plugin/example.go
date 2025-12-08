@@ -45,18 +45,37 @@ func ExampleRegisterWechatPlugin() {
 // }
 
 // 占位符函数（实际实现需要根据具体支付方式）
+
+// NewAlipayWapPlugin 创建支付宝手机网站支付插件（示例）
 func NewAlipayWapPlugin(pluginID int64) Plugin {
-	return &BasePlugin{pluginID: pluginID}
+	// 实际应该返回 AlipayWapPlugin 实例
+	// 这里使用 BasePlugin 作为示例（应该使用 alipay.NewBasePlugin）
+	// 注意：实际实现应该在 internal/plugin/alipay 包中
+	return NewBasePlugin(pluginID)
 }
 
+// NewAlipayAppPlugin 创建支付宝APP支付插件（示例）
 func NewAlipayAppPlugin(pluginID int64) Plugin {
-	return &BasePlugin{pluginID: pluginID}
+	// 实际应该返回 AlipayAppPlugin 实例
+	// 这里使用 BasePlugin 作为示例（应该使用 alipay.NewBasePlugin）
+	// 注意：实际实现应该在 internal/plugin/alipay 包中
+	return NewBasePlugin(pluginID)
 }
 
+// NewWechatWapPlugin 创建微信手机网站支付插件（示例）
+// 微信插件应该继承 BasePlugin，而不是 alipay.BasePlugin
+// 微信插件应该有自己的基类（WechatBasePlugin），继承自 plugin.BasePlugin
 func NewWechatWapPlugin(pluginID int64) Plugin {
-	return &BasePlugin{pluginID: pluginID}
+	// 微信插件应该有自己的基类（WechatBasePlugin），继承自 BasePlugin
+	// 这里使用 BasePlugin 作为示例
+	return NewBasePlugin(pluginID)
 }
 
+// NewWechatAppPlugin 创建微信APP支付插件（示例）
+// 微信插件应该继承 BasePlugin，而不是 alipay.BasePlugin
+// 微信插件应该有自己的基类（WechatBasePlugin），继承自 plugin.BasePlugin
 func NewWechatAppPlugin(pluginID int64) Plugin {
-	return &BasePlugin{pluginID: pluginID}
+	// 微信插件应该有自己的基类（WechatBasePlugin），继承自 BasePlugin
+	// 这里使用 BasePlugin 作为示例
+	return NewBasePlugin(pluginID)
 }

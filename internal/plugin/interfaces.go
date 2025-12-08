@@ -35,6 +35,9 @@ type Plugin interface {
 	// WaitProduct 等待产品（获取产品ID、核销ID、CookieID等）
 	// 参考 Python: BasePluginResponder.wait_product
 	WaitProduct(ctx context.Context, req *WaitProductRequest) (*WaitProductResponse, error)
+	// CallbackSubmit 下单回调（订单创建成功后调用）
+	// 参考 Python: BasePluginResponder.callback_submit
+	CallbackSubmit(ctx context.Context, req *CallbackSubmitRequest) error
 }
 
 // PluginCapabilities 插件能力接口（可选实现）
@@ -55,9 +58,9 @@ type PluginCapabilities interface {
 type CreateOrderRequest struct {
 	OutOrderNo     string                 `json:"out_order_no"`
 	OrderNo        string                 `json:"order_no"`
-	OrderID        string                 `json:"order_id"`        // 订单ID（主键）
-	DetailID       int64                  `json:"detail_id"`       // 订单详情ID
-	ProductID      string                 `json:"product_id"`      // 产品ID
+	OrderID        string                 `json:"order_id"`   // 订单ID（主键）
+	DetailID       int64                  `json:"detail_id"`  // 订单详情ID
+	ProductID      string                 `json:"product_id"` // 产品ID
 	Money          int                    `json:"money"`
 	NotifyURL      string                 `json:"notify_url"`
 	JumpURL        string                 `json:"jump_url"`
@@ -125,12 +128,12 @@ type WaitProductRequest struct {
 
 // WaitProductResponse 等待产品响应
 type WaitProductResponse struct {
-	ProductID  string  `json:"product_id"`  // 产品ID
-	WriteoffID *int64  `json:"writeoff_id"` // 核销ID
-	CookieID   string  `json:"cookie_id"`    // Cookie ID
-	Money      int     `json:"money"`        // 金额（可能被调整）
-	Success    bool    `json:"success"`
-	ErrorCode  int     `json:"error_code,omitempty"`
+	ProductID    string `json:"product_id"`  // 产品ID
+	WriteoffID   *int64 `json:"writeoff_id"` // 核销ID
+	CookieID     string `json:"cookie_id"`   // Cookie ID
+	Money        int    `json:"money"`       // 金额（可能被调整）
+	Success      bool   `json:"success"`
+	ErrorCode    int    `json:"error_code,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
@@ -152,4 +155,27 @@ func NewWaitProductErrorResponse(code int, message string) *WaitProductResponse 
 		ErrorCode:    code,
 		ErrorMessage: message,
 	}
+}
+
+// CallbackSubmitRequest 下单回调请求
+// 参考 Python: callback_plugin_submit 的参数
+type CallbackSubmitRequest struct {
+	OrderNo        string `json:"order_no"`        // 订单号
+	OutOrderNo     string `json:"out_order_no"`    // 商户订单号
+	PluginID       int64  `json:"plugin_id"`       // 插件ID
+	Tax            int    `json:"tax"`             // 税费
+	PluginType     string `json:"plugin_type"`     // 插件类型
+	Money          int    `json:"money"`           // 订单金额（分）
+	DomainID       *int64 `json:"domain_id"`       // 域名ID
+	NotifyMoney    int    `json:"notify_money"`    // 通知金额（分）
+	OrderID        string `json:"order_id"`        // 订单数据库ID
+	ProductID      string `json:"product_id"`      // 产品ID
+	CookieID       string `json:"cookie_id"`       // Cookie ID（可选）
+	ChannelID      int64  `json:"channel_id"`      // 支付通道ID
+	MerchantID     int64  `json:"merchant_id"`     // 商户ID
+	WriteoffID     *int64 `json:"writeoff_id"`     // 核销ID
+	TenantID       int64  `json:"tenant_id"`       // 租户ID
+	CreateDatetime string `json:"create_datetime"` // 订单创建时间（格式：2006-01-02 15:04:05）
+	NotifyURL      string `json:"notify_url"`      // 通知URL
+	PluginUpstream int    `json:"plugin_upstream"` // 插件上游类型
 }
