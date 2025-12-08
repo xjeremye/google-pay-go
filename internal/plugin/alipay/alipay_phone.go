@@ -2,7 +2,6 @@ package alipay
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -297,57 +296,3 @@ func (p *PhonePlugin) GetTimeout(ctx context.Context, pluginID int64) int {
 // phone 插件嵌入 BasePlugin（支付宝基类），直接使用支付宝基类的通用实现
 // 如果需要自定义逻辑，可以覆盖此方法
 // 当前实现：不覆盖，通过嵌入直接使用基类方法
-
-// getSystemConfigByPath 通过路径获取系统配置（避免循环依赖）
-// path 格式：如 "alipay.inline_notify_domain"
-func getSystemConfigByPath(ctx context.Context, path string) string {
-	// 先尝试直接获取
-	var config models.SystemConfig
-	if err := database.DB.Where("key = ? AND status = ? AND parent_id IS NULL", path, true).
-		First(&config).Error; err == nil {
-		return parseSystemConfigValue(config.Value)
-	}
-
-	// 如果直接获取失败，尝试按点分割路径
-	parts := strings.Split(path, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-
-	// 先找父配置
-	var parentConfig models.SystemConfig
-	if err := database.DB.Where("key = ? AND status = ? AND parent_id IS NULL", parts[0], true).
-		First(&parentConfig).Error; err != nil {
-		return ""
-	}
-
-	// 再找子配置
-	if err := database.DB.Where("key = ? AND status = ? AND parent_id = ?", parts[1], true, parentConfig.ID).
-		First(&config).Error; err != nil {
-		return ""
-	}
-
-	return parseSystemConfigValue(config.Value)
-}
-
-// parseSystemConfigValue 解析系统配置的 JSON 值
-func parseSystemConfigValue(valueStr string) string {
-	if valueStr == "" {
-		return ""
-	}
-
-	// 尝试解析 JSON
-	var valueMap map[string]interface{}
-	if err := json.Unmarshal([]byte(valueStr), &valueMap); err != nil {
-		// 如果解析失败，尝试直接返回原始值
-		return valueStr
-	}
-
-	// 尝试获取 value 字段
-	if value, ok := valueMap["value"].(string); ok {
-		return value
-	}
-
-	// 如果 value 不是字符串，返回空
-	return ""
-}
