@@ -309,11 +309,13 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 
 	// 检查订单状态，避免重复处理
 	// 如果订单已经是成功状态，且回调也是成功，则跳过
-	if order.OrderStatus == models.OrderStatusPaid {
+	// 如果订单已经是支付成功状态（无论是通知已返回还是未返回），跳过重复回调
+	if order.OrderStatus == models.OrderStatusPaid || order.OrderStatus == models.OrderStatusPaidNoNotify {
 		if notifyData.TradeStatus == "TRADE_SUCCESS" || notifyData.TradeStatus == "TRADE_FINISHED" {
 			logger.Logger.Info("订单已处理，跳过重复回调",
 				zap.String("order_id", order.ID),
-				zap.String("trade_status", notifyData.TradeStatus))
+				zap.String("trade_status", notifyData.TradeStatus),
+				zap.Int("current_status", order.OrderStatus))
 			// 仍然更新 ticket_no（如果还没有）
 			if notifyData.TradeNo != "" && orderDetail.TicketNo == "" {
 				database.DB.Model(&models.OrderDetail{}).
@@ -329,8 +331,9 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 	var newStatus int
 	switch notifyData.TradeStatus {
 	case "TRADE_SUCCESS", "TRADE_FINISHED":
-		// 交易成功
-		newStatus = models.OrderStatusPaid
+		// 交易成功，但商户通知还未成功，先设置为"支付成功，通知未返回"
+		// 只有当商户通知成功时，才会更新为"支付成功，通知已返回"
+		newStatus = models.OrderStatusPaidNoNotify
 	case "TRADE_CLOSED":
 		// 交易关闭（可能是退款或取消）
 		newStatus = models.OrderStatusFailed
@@ -353,7 +356,7 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 	}
 
 	// 通知商户（异步执行）
-	if newStatus == models.OrderStatusPaid {
+	if newStatus == models.OrderStatusPaidNoNotify {
 		// 重新查询订单和详情（获取最新状态）
 		var updatedOrder models.Order
 		var updatedDetail models.OrderDetail

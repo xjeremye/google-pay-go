@@ -67,13 +67,39 @@ func (s *OrderNotifyService) NotifyMerchant(ctx context.Context, order *models.O
 	// 执行通知
 	success := s.sendNotification(ctx, notification.ID, orderDetail.NotifyURL, string(notifyJSON))
 
+	// 重新获取通知记录以获取最新的版本号（防止并发更新）
+	var latestNotification models.MerchantNotification
+	if err := database.DB.Where("id = ?", notification.ID).First(&latestNotification).Error; err != nil {
+		logger.Logger.Warn("获取最新通知记录失败",
+			zap.Int64("notification_id", notification.ID),
+			zap.Error(err))
+		return
+	}
+
 	// 更新通知状态
 	if success {
 		// 通知成功，更新状态为成功
-		s.updateNotificationStatus(notification.ID, models.NotificationStatusSuccess)
+		s.updateNotificationStatus(latestNotification.ID, latestNotification.Ver, models.NotificationStatusSuccess)
+
+		// 如果订单状态是"支付成功，通知未返回"，则更新为"支付成功，通知已返回"
+		// 需要重新查询订单以获取最新状态
+		var currentOrder models.Order
+		if err := database.DB.Where("id = ?", order.ID).First(&currentOrder).Error; err == nil {
+			if currentOrder.OrderStatus == models.OrderStatusPaidNoNotify {
+				// 更新订单状态为"支付成功，通知已返回"
+				if err := s.orderService.UpdateOrderStatus(ctx, order.ID, models.OrderStatusPaid, ""); err != nil {
+					logger.Logger.Warn("商户通知成功，但更新订单状态失败",
+						zap.String("order_id", order.ID),
+						zap.Error(err))
+				} else {
+					logger.Logger.Info("商户通知成功，订单状态已更新为'支付成功，通知已返回'",
+						zap.String("order_id", order.ID))
+				}
+			}
+		}
 	} else {
 		// 通知失败，更新状态为失败（等待重试）
-		s.updateNotificationStatus(notification.ID, models.NotificationStatusFailed)
+		s.updateNotificationStatus(latestNotification.ID, latestNotification.Ver, models.NotificationStatusFailed)
 	}
 }
 
@@ -144,6 +170,8 @@ func (s *OrderNotifyService) sendNotification(ctx context.Context, notificationI
 	// 记录通知历史
 	s.recordNotificationHistory(notificationID, notifyURL, "POST", requestBody, resp.StatusCode, bodyStr)
 
+	// 只有 HTTP 200 状态码才认为通知成功
+	// 其他状态码（如 403、404、500 等）都视为失败
 	if resp.StatusCode == http.StatusOK {
 		logger.Logger.Info("商户通知成功",
 			zap.Int64("notification_id", notificationID),
@@ -152,10 +180,12 @@ func (s *OrderNotifyService) sendNotification(ctx context.Context, notificationI
 			zap.String("response", bodyStr))
 		return true
 	} else {
-		logger.Logger.Warn("商户通知失败",
+		// 明确记录失败原因（包括状态码）
+		logger.Logger.Warn("商户通知失败：HTTP 状态码不是 200",
 			zap.Int64("notification_id", notificationID),
 			zap.String("notify_url", notifyURL),
 			zap.Int("status_code", resp.StatusCode),
+			zap.String("expected_status", "200"),
 			zap.String("response", bodyStr))
 		return false
 	}
@@ -182,21 +212,37 @@ func (s *OrderNotifyService) recordNotificationHistory(notificationID int64, url
 	}
 }
 
-// updateNotificationStatus 更新通知状态
-func (s *OrderNotifyService) updateNotificationStatus(notificationID int64, status int) {
+// updateNotificationStatus 更新通知状态（使用乐观锁）
+// 只有当记录的版本号匹配时才会更新，防止并发更新冲突
+func (s *OrderNotifyService) updateNotificationStatus(notificationID int64, currentVer int64, status int) bool {
 	now := time.Now()
-	if err := database.DB.Model(&models.MerchantNotification{}).
-		Where("id = ?", notificationID).
+	result := database.DB.Model(&models.MerchantNotification{}).
+		Where("id = ? AND ver = ?", notificationID, currentVer).
 		Updates(map[string]interface{}{
 			"status":          status,
 			"update_datetime": &now,
 			"ver":             gorm.Expr("ver + ?", 1),
-		}).Error; err != nil {
+		})
+
+	if result.Error != nil {
 		logger.Logger.Warn("更新通知状态失败",
 			zap.Int64("notification_id", notificationID),
+			zap.Int64("current_ver", currentVer),
 			zap.Int("status", status),
-			zap.Error(err))
+			zap.Error(result.Error))
+		return false
 	}
+
+	// 检查是否成功更新（如果 RowsAffected 为 0，说明版本号已被其他进程修改）
+	if result.RowsAffected == 0 {
+		logger.Logger.Warn("更新通知状态失败：版本号冲突（可能已被其他进程更新）",
+			zap.Int64("notification_id", notificationID),
+			zap.Int64("current_ver", currentVer),
+			zap.Int("status", status))
+		return false
+	}
+
+	return true
 }
 
 // RetryFailedNotifications 重试失败的通知
@@ -242,7 +288,13 @@ func (s *OrderNotifyService) RetryFailedNotifications(ctx context.Context) {
 		// 最大重试次数（5次）
 		maxRetries := 5
 		if historyCount >= int64(maxRetries) {
-			s.updateNotificationStatus(notification.ID, models.NotificationStatusMaxRetry)
+			// 更新为最大重试状态（使用乐观锁）
+			if s.updateNotificationStatus(notification.ID, notification.Ver, models.NotificationStatusMaxRetry) {
+				logger.Logger.Info("通知已达到最大重试次数，已标记为最大重试状态",
+					zap.Int64("notification_id", notification.ID),
+					zap.String("order_id", order.ID),
+					zap.Int64("retry_count", historyCount))
+			}
 			continue
 		}
 
@@ -265,8 +317,14 @@ func (s *OrderNotifyService) RetryFailedNotifications(ctx context.Context) {
 			zap.String("order_id", order.ID),
 			zap.Int64("retry_count", historyCount))
 
-		// 更新状态为重试中
-		s.updateNotificationStatus(notification.ID, models.NotificationStatusRetrying)
+		// 更新状态为重试中（使用乐观锁）
+		if !s.updateNotificationStatus(notification.ID, notification.Ver, models.NotificationStatusRetrying) {
+			// 如果更新失败（版本冲突），跳过此次重试
+			logger.Logger.Warn("更新通知状态为重试中失败（版本冲突），跳过此次重试",
+				zap.Int64("notification_id", notification.ID),
+				zap.String("order_id", order.ID))
+			continue
+		}
 
 		// 构建通知数据
 		notifyData := map[string]interface{}{
@@ -283,11 +341,52 @@ func (s *OrderNotifyService) RetryFailedNotifications(ctx context.Context) {
 		// 发送通知
 		success := s.sendNotification(ctx, notification.ID, orderDetail.NotifyURL, string(notifyJSON))
 
-		// 更新状态
+		// 重新获取通知记录以获取最新的版本号（防止并发更新）
+		var latestNotification models.MerchantNotification
+		if err := database.DB.Where("id = ?", notification.ID).First(&latestNotification).Error; err != nil {
+			logger.Logger.Warn("获取最新通知记录失败",
+				zap.Int64("notification_id", notification.ID),
+				zap.Error(err))
+			continue
+		}
+
+		// 更新状态（使用乐观锁）
 		if success {
-			s.updateNotificationStatus(notification.ID, models.NotificationStatusSuccess)
+			if s.updateNotificationStatus(latestNotification.ID, latestNotification.Ver, models.NotificationStatusSuccess) {
+				logger.Logger.Info("重试通知成功",
+					zap.Int64("notification_id", latestNotification.ID),
+					zap.String("order_id", order.ID))
+
+				// 如果订单状态是"支付成功，通知未返回"，则更新为"支付成功，通知已返回"
+				var currentOrder models.Order
+				if err := database.DB.Where("id = ?", order.ID).First(&currentOrder).Error; err == nil {
+					if currentOrder.OrderStatus == models.OrderStatusPaidNoNotify {
+						// 更新订单状态为"支付成功，通知已返回"
+						if err := s.orderService.UpdateOrderStatus(ctx, order.ID, models.OrderStatusPaid, ""); err != nil {
+							logger.Logger.Warn("重试通知成功，但更新订单状态失败",
+								zap.String("order_id", order.ID),
+								zap.Error(err))
+						} else {
+							logger.Logger.Info("重试通知成功，订单状态已更新为'支付成功，通知已返回'",
+								zap.String("order_id", order.ID))
+						}
+					}
+				}
+			} else {
+				logger.Logger.Warn("更新通知状态为成功失败（版本冲突）",
+					zap.Int64("notification_id", latestNotification.ID),
+					zap.String("order_id", order.ID))
+			}
 		} else {
-			s.updateNotificationStatus(notification.ID, models.NotificationStatusFailed)
+			if s.updateNotificationStatus(latestNotification.ID, latestNotification.Ver, models.NotificationStatusFailed) {
+				logger.Logger.Info("重试通知失败，已标记为失败状态",
+					zap.Int64("notification_id", latestNotification.ID),
+					zap.String("order_id", order.ID))
+			} else {
+				logger.Logger.Warn("更新通知状态为失败失败（版本冲突）",
+					zap.Int64("notification_id", latestNotification.ID),
+					zap.String("order_id", order.ID))
+			}
 		}
 	}
 }

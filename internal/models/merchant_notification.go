@@ -20,12 +20,14 @@ func (MerchantNotification) TableName() string {
 }
 
 // NotificationStatus 通知状态常量
+// 注意：状态码必须与 Python 后端保持一致
+// Python: (0, "未通知"), (1, "通知失败"), (2, "通知成功")
 const (
-	NotificationStatusPending  = 0 // 待通知
-	NotificationStatusSuccess  = 1 // 通知成功
-	NotificationStatusFailed   = 2 // 通知失败
-	NotificationStatusRetrying = 3 // 重试中
-	NotificationStatusMaxRetry = 4 // 达到最大重试次数
+	NotificationStatusPending  = 0 // 未通知（待通知）
+	NotificationStatusFailed   = 1 // 通知失败
+	NotificationStatusSuccess  = 2 // 通知成功
+	NotificationStatusRetrying = 3 // 重试中（Go 扩展状态，Python 端可能不支持）
+	NotificationStatusMaxRetry = 5 // 达到最大重试次数（Go 扩展状态，Python 端可能不支持）
 )
 
 // MerchantNotificationHistory 商户通知记录模型

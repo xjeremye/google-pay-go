@@ -342,11 +342,13 @@ func handleAlipayNotifyMessages(ctx context.Context, msg *rocketmq.MessageView) 
 	}
 
 	// 检查订单状态，避免重复处理
-	if order.OrderStatus == models.OrderStatusPaid {
+	// 如果订单已经是支付成功状态（无论是通知已返回还是未返回），跳过重复回调
+	if order.OrderStatus == models.OrderStatusPaid || order.OrderStatus == models.OrderStatusPaidNoNotify {
 		if notifyMsg.NotifyData.TradeStatus == "TRADE_SUCCESS" || notifyMsg.NotifyData.TradeStatus == "TRADE_FINISHED" {
 			logger.Logger.Info("订单已处理，跳过重复回调",
 				zap.String("order_id", order.ID),
-				zap.String("trade_status", notifyMsg.NotifyData.TradeStatus))
+				zap.String("trade_status", notifyMsg.NotifyData.TradeStatus),
+				zap.Int("current_status", order.OrderStatus))
 			// 仍然更新 ticket_no（如果还没有）
 			if notifyMsg.NotifyData.TradeNo != "" && orderDetail.TicketNo == "" {
 				database.DB.Model(&models.OrderDetail{}).
@@ -361,7 +363,9 @@ func handleAlipayNotifyMessages(ctx context.Context, msg *rocketmq.MessageView) 
 	var newStatus int
 	switch notifyMsg.NotifyData.TradeStatus {
 	case "TRADE_SUCCESS", "TRADE_FINISHED":
-		newStatus = models.OrderStatusPaid
+		// 交易成功，但商户通知还未成功，先设置为"支付成功，通知未返回"
+		// 只有当商户通知成功时，才会更新为"支付成功，通知已返回"
+		newStatus = models.OrderStatusPaidNoNotify
 	case "TRADE_CLOSED":
 		newStatus = models.OrderStatusFailed
 	default:
@@ -382,7 +386,7 @@ func handleAlipayNotifyMessages(ctx context.Context, msg *rocketmq.MessageView) 
 
 	// 通知商户（如果订单成功）
 	// 发送订单通知消息到队列（而不是直接调用 service）
-	if newStatus == models.OrderStatusPaid {
+	if newStatus == models.OrderStatusPaidNoNotify {
 		// 重新查询订单和详情（获取最新状态）
 		var updatedOrder models.Order
 		var updatedDetail models.OrderDetail
