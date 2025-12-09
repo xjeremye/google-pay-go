@@ -78,6 +78,8 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 				err = handleCacheRefreshMessages(ctx, message)
 			case "balance-sync":
 				err = handleBalanceSyncMessages(ctx, message)
+			case "order-timeout":
+				err = handleOrderTimeoutMessages(ctx, message)
 			default:
 				logger.Logger.Warn("未知的主题",
 					zap.String("topic", topic),
@@ -115,6 +117,7 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 				"alipay-notify":   rocketmq.SUB_ALL,
 				"cache-refresh":   rocketmq.SUB_ALL,
 				"balance-sync":    rocketmq.SUB_ALL,
+				"order-timeout":   rocketmq.SUB_ALL,
 			}),
 			rocketmq.WithPushMessageListener(listener),
 		)
@@ -536,6 +539,84 @@ func handleBalanceSyncMessages(ctx context.Context, msg *rocketmq.MessageView) e
 		zap.Any("tenant_ids", syncMsg.TenantIDs),
 		zap.Any("writeoff_ids", syncMsg.WriteoffIDs),
 		zap.Bool("full", syncMsg.Full))
+
+	return nil
+}
+
+// handleOrderTimeoutMessages 处理订单超时消息
+func handleOrderTimeoutMessages(ctx context.Context, msg *rocketmq.MessageView) error {
+	var timeoutMsg OrderTimeoutMessage
+	if err := json.Unmarshal(msg.GetBody(), &timeoutMsg); err != nil {
+		logger.Logger.Error("解析 order_timeout 消息失败",
+			zap.String("message_id", msg.GetMessageId()),
+			zap.Error(err))
+		return err
+	}
+
+	logger.Logger.Info("收到订单超时消息",
+		zap.String("order_id", timeoutMsg.OrderID),
+		zap.String("order_no", timeoutMsg.OrderNo),
+		zap.Int("timeout_seconds", timeoutMsg.TimeoutSeconds),
+		zap.Int64("create_datetime", timeoutMsg.CreateDatetime))
+
+	// 查询订单当前状态（需要查询 merchant_id 和 money，用于释放预占余额）
+	var order models.Order
+	if err := database.DB.Select("id, order_no, order_status, create_datetime, merchant_id, money").
+		Where("id = ?", timeoutMsg.OrderID).
+		First(&order).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			logger.Logger.Warn("订单不存在，可能已删除",
+				zap.String("order_id", timeoutMsg.OrderID))
+			return nil // 订单不存在，不返回错误
+		}
+		logger.Logger.Error("查询订单失败",
+			zap.String("order_id", timeoutMsg.OrderID),
+			zap.Error(err))
+		return err
+	}
+
+	// 验证订单是否真的超时（防止消息延迟导致误判）
+	if order.CreateDatetime != nil {
+		expectedExpireTime := order.CreateDatetime.Add(time.Duration(timeoutMsg.TimeoutSeconds) * time.Second)
+		now := time.Now()
+		// 如果当前时间还没到过期时间，说明消息提前到达了，不处理
+		if now.Before(expectedExpireTime) {
+			logger.Logger.Info("订单尚未超时，跳过处理（消息提前到达）",
+				zap.String("order_id", timeoutMsg.OrderID),
+				zap.String("order_no", timeoutMsg.OrderNo),
+				zap.Time("create_time", *order.CreateDatetime),
+				zap.Time("expected_expire_time", expectedExpireTime),
+				zap.Time("current_time", now),
+				zap.Duration("remaining_time", expectedExpireTime.Sub(now)))
+			return nil
+		}
+		logger.Logger.Info("订单已超时，开始处理",
+			zap.String("order_id", timeoutMsg.OrderID),
+			zap.String("order_no", timeoutMsg.OrderNo),
+			zap.Time("create_time", *order.CreateDatetime),
+			zap.Time("expected_expire_time", expectedExpireTime),
+			zap.Time("current_time", now),
+			zap.Duration("overdue_time", now.Sub(expectedExpireTime)))
+	} else {
+		logger.Logger.Warn("订单创建时间为空，无法验证超时时间",
+			zap.String("order_id", timeoutMsg.OrderID),
+			zap.String("order_no", timeoutMsg.OrderNo))
+	}
+
+	// 使用统一的超时处理函数
+	// 参考 Python: timeout_check 的逻辑
+	if err := HandleOrderTimeout(ctx, timeoutMsg.OrderNo); err != nil {
+		logger.Logger.Error("处理订单超时失败",
+			zap.String("order_id", timeoutMsg.OrderID),
+			zap.String("order_no", timeoutMsg.OrderNo),
+			zap.Error(err))
+		return err
+	}
+
+	logger.Logger.Info("订单已超时，处理完成（通过延迟消息）",
+		zap.String("order_id", timeoutMsg.OrderID),
+		zap.String("order_no", timeoutMsg.OrderNo),
+		zap.Int("timeout_seconds", timeoutMsg.TimeoutSeconds))
 
 	return nil
 }

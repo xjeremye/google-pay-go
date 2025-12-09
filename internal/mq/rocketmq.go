@@ -21,9 +21,9 @@ import (
 // 保留此函数仅用于向后兼容（如果其他地方有调用）
 func setupRocketMQLogger() {
 	os.Setenv("mq.consoleAppender.enabled", "false")
-	if os.Getenv("rocketmq.client.logLevel") == "" {
-		os.Setenv("rocketmq.client.logLevel", "WARN")
-	}
+	// if os.Getenv("rocketmq.client.logLevel") == "" {
+	// 	os.Setenv("rocketmq.client.logLevel", "WARN")
+	// }
 	rocketmq.ResetLogger()
 }
 
@@ -286,12 +286,19 @@ func (c *RocketMQClient) SendMessageSync(ctx context.Context, topic, tag string,
 // SendDelayMessage 发送延迟消息
 func (c *RocketMQClient) SendDelayMessage(ctx context.Context, topic, tag string, body interface{}, delay time.Duration) error {
 	if !c.enabled {
+		logger.Logger.Warn("RocketMQ 未启用，无法发送延迟消息",
+			zap.String("topic", topic),
+			zap.String("tag", tag))
 		return fmt.Errorf("RocketMQ 未启用")
 	}
 
 	// 序列化消息体
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
+		logger.Logger.Error("序列化延迟消息失败",
+			zap.String("topic", topic),
+			zap.String("tag", tag),
+			zap.Error(err))
 		return fmt.Errorf("序列化消息失败: %w", err)
 	}
 
@@ -303,14 +310,44 @@ func (c *RocketMQClient) SendDelayMessage(ctx context.Context, topic, tag string
 	if tag != "" {
 		message.SetTag(tag)
 	}
+
 	// 设置延迟时间（RocketMQ 5.0+ 支持精确延迟时间）
-	message.SetDelayTimestamp(time.Now().Add(delay))
+	delayTimestamp := time.Now().Add(delay)
+	message.SetDelayTimestamp(delayTimestamp)
+
+	logger.Logger.Debug("准备发送延迟消息",
+		zap.String("topic", topic),
+		zap.String("tag", tag),
+		zap.Duration("delay", delay),
+		zap.Time("delay_timestamp", delayTimestamp),
+		zap.Int("body_size", len(bodyBytes)))
 
 	// 发送消息
-	_, err = c.producer.Send(ctx, message)
+	sendResults, err := c.producer.Send(ctx, message)
 	if err != nil {
+		logger.Logger.Error("发送延迟消息失败",
+			zap.String("topic", topic),
+			zap.String("tag", tag),
+			zap.Duration("delay", delay),
+			zap.Error(err))
 		return fmt.Errorf("发送延迟消息失败: %w", err)
 	}
+
+	// 记录发送结果
+	messageIDs := make([]string, 0, len(sendResults))
+	for _, result := range sendResults {
+		if result != nil {
+			messageIDs = append(messageIDs, fmt.Sprintf("%v", result))
+		}
+	}
+
+	logger.Logger.Info("延迟消息发送成功",
+		zap.String("topic", topic),
+		zap.String("tag", tag),
+		zap.Duration("delay", delay),
+		zap.Time("delay_timestamp", delayTimestamp),
+		zap.Strings("message_ids", messageIDs),
+		zap.Int("result_count", len(sendResults)))
 
 	return nil
 }

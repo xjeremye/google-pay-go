@@ -29,6 +29,7 @@ import (
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/mq"
+	"github.com/golang-pay-core/internal/plugin"
 	_ "github.com/golang-pay-core/internal/plugin/alipay" // 导入以触发自动注册（包含 alipay_mock）
 	"github.com/golang-pay-core/internal/router"
 	"github.com/golang-pay-core/internal/service"
@@ -85,12 +86,22 @@ func main() {
 	// 所有插件的注册逻辑都在各自的包中管理，保持 main.go 的简洁性
 	logger.Logger.Info("插件系统已初始化")
 
+	// 设置全局插件配置提供者（使用 CacheService，避免循环依赖）
+	cacheService := service.NewCacheService()
+	plugin.SetConfigProvider(cacheService)
+	logger.Logger.Info("插件配置提供者已设置（使用 CacheService）")
+
 	refreshCtx := context.Background()
 
 	// 启动通知重试服务（每30秒检查一次失败的通知并重试）
 	notifyRetryService := service.NewNotifyRetryService()
 	go notifyRetryService.Start(refreshCtx)
 	logger.Logger.Info("通知重试服务已启动（每30秒检查一次失败的通知）")
+
+	// 启动订单超时检查服务（每30秒检查一次超时的订单）
+	orderTimeoutService := service.NewOrderTimeoutService()
+	go orderTimeoutService.Start(refreshCtx)
+	logger.Logger.Info("订单超时检查服务已启动（每30秒检查一次超时的订单）")
 
 	// 初始化全局 RocketMQ 生产者客户端（单例模式，避免重复创建）
 	mqProducer := mq.GetGlobalMQClient()

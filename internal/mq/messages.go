@@ -83,3 +83,11 @@ type BalanceSyncMessage struct {
 	WriteoffIDs []int64 `json:"writeoff_ids"` // 需要刷新余额的码商
 	Full        bool    `json:"full"`         // 是否强制全量刷新余额
 }
+
+// OrderTimeoutMessage 订单超时消息
+type OrderTimeoutMessage struct {
+	OrderID        string `json:"order_id"`        // 订单ID
+	OrderNo        string `json:"order_no"`        // 订单号
+	CreateDatetime int64  `json:"create_datetime"` // 创建时间戳（Unix时间戳）
+	TimeoutSeconds int    `json:"timeout_seconds"` // 超时时间（秒）
+}

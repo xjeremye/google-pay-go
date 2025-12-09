@@ -71,3 +71,4 @@ rocketmq:
     - "alipay-notify"           # 支付宝回调主题
     - "cache-refresh"           # 缓存刷新触发主题（替代定时器）
     - "balance-sync"            # 后台调额后余额同步主题
+    - "order-timeout"           # 订单超时主题（延迟消息）

@@ -3,159 +3,31 @@ package mq
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
+	"github.com/golang-pay-core/internal/order"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-// updateOrderStatusDirectly 直接更新订单状态（避免循环依赖）
-// 参考 service.OrderService.UpdateOrderStatus 的逻辑
-func updateOrderStatusDirectly(ctx context.Context, orderID string, status int, ticketNo string) error {
-	// 先查询订单信息（在事务外，减少事务时间）
-	var order models.Order
-	if err := database.DB.Select("id, merchant_id, money, order_status").
-		Where("id = ?", orderID).
-		First(&order).Error; err != nil {
-		return fmt.Errorf("订单不存在: %w", err)
+// tenantIDProviderAdapter 租户ID提供者适配器（实现 order.TenantIDProvider 接口）
+type tenantIDProviderAdapter struct{}
+
+func (a *tenantIDProviderAdapter) GetTenantIDByMerchantID(ctx context.Context, merchantID int64) (*int64, error) {
+	// 查询商户信息获取租户ID（mq 包中直接查询数据库，避免循环依赖）
+	var merchant models.Merchant
+	if err := database.DB.Select("parent_id").Where("id = ?", merchantID).First(&merchant).Error; err == nil && merchant.ParentID > 0 {
+		return &merchant.ParentID, nil
 	}
-
-	// 检查订单状态是否已经变更（避免重复处理）
-	if order.OrderStatus == status {
-		return nil // 状态未变化，直接返回
-	}
-
-	// 查询商户信息获取租户ID
-	var tenantID *int64
-	if order.MerchantID != nil {
-		var merchant models.Merchant
-		if err := database.DB.Select("parent_id").Where("id = ?", *order.MerchantID).First(&merchant).Error; err == nil && merchant.ParentID > 0 {
-			tenantID = &merchant.ParentID
-		}
-	}
-
-	// 开启事务
-	tx := database.DB.Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	now := time.Now()
-
-	// 处理租户余额（在事务中，确保一致性）
-	if tenantID != nil {
-		// 根据订单状态处理预占余额和余额
-		switch status {
-		case models.OrderStatusPaid:
-			// 订单支付成功：从数据库扣减余额
-			// 先查询变更前的余额（使用 SELECT FOR UPDATE 确保一致性），用于记录流水
-			var tenant models.Tenant
-			if err := tx.Set("gorm:query_option", "FOR UPDATE").
-				Where("id = ?", *tenantID).First(&tenant).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("查询租户余额失败: %w", err)
-			}
-
-			oldBalance := tenant.Balance
-			newBalance := oldBalance - int64(order.Money)
-
-			// 使用原子操作扣减余额
-			if err := tx.Model(&models.Tenant{}).
-				Where("id = ?", *tenantID).
-				Update("balance", gorm.Expr("balance - ?", order.Money)).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("扣减租户余额失败: %w", err)
-			}
-
-			// 记录租户资金流水
-			cashflow := &models.TenantCashflow{
-				OldMoney:       oldBalance,
-				NewMoney:       newBalance,
-				ChangeMoney:    -int64(order.Money), // 负数表示扣减
-				FlowType:       models.CashflowTypeOrderDeduct,
-				OrderID:        &orderID,
-				PayChannelID:   order.PayChannelID,
-				TenantID:       *tenantID,
-				CreateDatetime: &now,
-			}
-			if err := tx.Create(cashflow).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("记录租户资金流水失败: %w", err)
-			}
-
-			// 释放预占余额（从 Redis）
-			// 直接操作 Redis，避免循环依赖
-			if err := releasePreTaxDirectly(ctx, *tenantID, int64(order.Money)); err != nil {
-				// 如果 Redis 释放失败，记录日志但不回滚数据库事务（数据库已扣减）
-				logger.Logger.Warn("释放预占余额失败",
-					zap.Int64("tenant_id", *tenantID),
-					zap.Int64("amount", int64(order.Money)),
-					zap.Error(err))
-			}
-
-			logger.Logger.Info("订单支付成功，已扣减租户余额",
-				zap.String("order_id", orderID),
-				zap.Int64("tenant_id", *tenantID),
-				zap.Int64("old_balance", oldBalance),
-				zap.Int64("new_balance", newBalance),
-				zap.Int("money", order.Money))
-
-		case models.OrderStatusFailed, models.OrderStatusCancelled:
-			// 订单失败/取消/过期：只从 Redis 释放预占，不扣减余额
-			if err := releasePreTaxDirectly(ctx, *tenantID, int64(order.Money)); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("释放预占余额失败: %w", err)
-			}
-			logger.Logger.Info("订单失败/取消/过期，已释放预占余额",
-				zap.String("order_id", orderID),
-				zap.Int64("tenant_id", *tenantID),
-				zap.Int("money", order.Money))
-		}
-	}
-
-	// 更新订单状态（合并多个字段更新，减少数据库往返）
-	updates := map[string]interface{}{
-		"order_status":    status,
-		"update_datetime": &now,
-	}
-
-	if status == models.OrderStatusPaid {
-		updates["pay_datetime"] = &now
-	}
-
-	if err := tx.Model(&models.Order{}).
-		Where("id = ?", orderID).
-		Updates(updates).Error; err != nil {
-		tx.Rollback()
-		return fmt.Errorf("更新订单状态失败: %w", err)
-	}
-
-	// 更新订单详情的 ticket_no（如果提供）
-	if ticketNo != "" {
-		if err := tx.Model(&models.OrderDetail{}).
-			Where("order_id = ?", orderID).
-			Update("ticket_no", ticketNo).Error; err != nil {
-			tx.Rollback()
-			return fmt.Errorf("更新订单详情 ticket_no 失败: %w", err)
-		}
-	}
-
-	// 提交事务
-	if err := tx.Commit().Error; err != nil {
-		return fmt.Errorf("提交事务失败: %w", err)
-	}
-
-	return nil
+	return nil, fmt.Errorf("无法获取租户ID")
 }
 
-// releasePreTaxDirectly 直接释放预占余额（避免循环依赖）
-// 参考 service.BalanceService.ReleasePreTax 的逻辑
-func releasePreTaxDirectly(ctx context.Context, tenantID int64, amount int64) error {
+// preTaxReleaserAdapter 预占余额释放器适配器（实现 order.PreTaxReleaser 接口）
+type preTaxReleaserAdapter struct{}
+
+func (a *preTaxReleaserAdapter) ReleasePreTax(ctx context.Context, tenantID int64, amount int64) error {
 	if database.RDB == nil {
 		return fmt.Errorf("Redis 未初始化")
 	}
@@ -189,6 +61,75 @@ func releasePreTaxDirectly(ctx context.Context, tenantID int64, amount int64) er
 		zap.Int64("tenant_id", tenantID),
 		zap.Int64("amount", amount),
 		zap.Any("new_pre_tax", result))
+
+	return nil
+}
+
+// updateOrderStatusDirectly 直接更新订单状态（避免循环依赖）
+// 使用统一的 order.UpdateStatus 实现，避免代码重复
+func updateOrderStatusDirectly(ctx context.Context, orderID string, status int, ticketNo string) error {
+	// 创建适配器
+	tenantIDProvider := &tenantIDProviderAdapter{}
+	preTaxReleaser := &preTaxReleaserAdapter{}
+
+	// 使用统一的订单状态更新逻辑
+	return order.UpdateStatus(ctx, order.UpdateStatusRequest{
+		OrderID:  orderID,
+		Status:   status,
+		TicketNo: ticketNo,
+	}, order.UpdateStatusOptions{
+		PreTaxReleaser:        preTaxReleaser,
+		TenantIDProvider:      tenantIDProvider,
+		HandleWriteoffBalance: false, // mq 包不需要处理码商余额
+	})
+}
+
+// HandleOrderTimeout 处理订单超时（统一逻辑，对外暴露）
+// 参考 Python: timeout_check 和 timeout_order
+// 只处理状态为 [0, 2]（生成中、等待支付）的订单，更新订单状态为 7（已关闭）并释放预占余额
+// 不处理已退款/已失败的订单（状态 [3, 5]）
+func HandleOrderTimeout(ctx context.Context, orderNo string) error {
+	// 查询订单（只查询状态为 [0, 2] 的订单）
+	// 参考 Python: timeout_order 只处理状态为 [0, 2] 的订单
+	var order models.Order
+	if err := database.DB.Select("id, order_no, order_status, merchant_id, money").
+		Where("order_no = ? AND order_status IN ?", orderNo, []int{
+			models.OrderStatusGenerating, // 0 - 生成中
+			models.OrderStatusPaying,     // 2 - 等待支付
+		}).
+		First(&order).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			logger.Logger.Info("订单不存在或状态不在超时检查范围内，跳过处理",
+				zap.String("order_no", orderNo),
+				zap.String("note", "只处理生成中(0)和待支付(2)状态的订单"))
+			return nil // 订单不存在或状态不在检查范围内，不返回错误
+		}
+		logger.Logger.Error("查询订单失败",
+			zap.String("order_no", orderNo),
+			zap.Error(err))
+		return err
+	}
+
+	logger.Logger.Info("开始处理订单超时",
+		zap.String("order_id", order.ID),
+		zap.String("order_no", orderNo),
+		zap.Int("current_status", order.OrderStatus))
+
+	// 状态为 [0, 2]，更新订单状态为已关闭（状态 7）并释放预占余额
+	// 参考 Python: timeout_order(order_no) - 只处理状态为 [0, 2] 的订单
+	if err := updateOrderStatusDirectly(ctx, order.ID, models.OrderStatusClosed, ""); err != nil {
+		logger.Logger.Error("更新超时订单状态失败",
+			zap.String("order_id", order.ID),
+			zap.String("order_no", orderNo),
+			zap.Error(err))
+		return err
+	}
+	logger.Logger.Info("订单已超时，状态已更新为已关闭",
+		zap.String("order_id", order.ID),
+		zap.String("order_no", orderNo),
+		zap.Int("old_status", order.OrderStatus),
+		zap.Int("new_status", models.OrderStatusClosed))
+	// 注意：预占余额的释放已经在 updateOrderStatusDirectly 中处理（OrderStatusCancelled = OrderStatusClosed）
 
 	return nil
 }

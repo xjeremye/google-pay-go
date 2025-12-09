@@ -14,6 +14,7 @@ import (
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/mq"
+	"github.com/golang-pay-core/internal/order"
 	"github.com/golang-pay-core/internal/plugin"
 	"github.com/golang-pay-core/internal/utils"
 	"go.uber.org/zap"
@@ -303,6 +304,80 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 	}
 	// 保存订单详情ID到上下文，避免后续重复查询
 	orderCtx.OrderDetailID = orderDetailID
+
+	// 6.1. 发送订单超时延迟消息（如果启用 RocketMQ）
+	// 使用延迟消息确保订单在超时后自动更新状态，比定时扫描更可靠
+	// 参考 Python: get_plugin_out_time(ctx.plugin.id) - 从插件配置获取超时时间
+	logger.Logger.Debug("检查是否需要发送订单超时延迟消息",
+		zap.String("order_no", orderCtx.OrderNo),
+		zap.Bool("mq_client_nil", s.mqClient == nil))
+
+	if s.mqClient == nil {
+		logger.Logger.Warn("RocketMQ 客户端未初始化，无法发送订单超时延迟消息",
+			zap.String("order_no", orderCtx.OrderNo))
+	} else if !s.mqClient.IsEnabled() {
+		logger.Logger.Warn("RocketMQ 未启用，无法发送订单超时延迟消息",
+			zap.String("order_no", orderCtx.OrderNo))
+	} else {
+		// 获取插件实例以获取超时时间
+		pluginInstance, err := s.pluginManager.GetPluginByCtx(ctx, orderCtx)
+		if err != nil {
+			logger.Logger.Warn("获取插件实例失败，无法发送超时延迟消息",
+				zap.String("order_no", orderCtx.OrderNo),
+				zap.Int64("plugin_id", orderCtx.PluginID),
+				zap.String("plugin_type", orderCtx.PluginType),
+				zap.Error(err))
+		} else {
+			// 如果插件实现了 PluginCapabilities 接口，使用插件的 GetTimeout 方法
+			capabilities, ok := pluginInstance.(plugin.PluginCapabilities)
+			if !ok {
+				logger.Logger.Warn("插件未实现 PluginCapabilities 接口，无法获取超时时间",
+					zap.String("order_no", orderCtx.OrderNo),
+					zap.String("plugin_type", orderCtx.PluginType),
+					zap.String("plugin_instance_type", fmt.Sprintf("%T", pluginInstance)))
+			} else {
+				timeoutSeconds := capabilities.GetTimeout(ctx, orderCtx.PluginID)
+				logger.Logger.Debug("获取到插件超时时间",
+					zap.String("order_no", orderCtx.OrderNo),
+					zap.Int64("plugin_id", orderCtx.PluginID),
+					zap.Int("timeout_seconds", timeoutSeconds))
+
+				timeoutMsg := &mq.OrderTimeoutMessage{
+					OrderID:        orderCtx.OrderID,
+					OrderNo:        orderCtx.OrderNo,
+					CreateDatetime: time.Now().Unix(),
+					TimeoutSeconds: timeoutSeconds,
+				}
+
+				// 发送延迟消息，延迟时间就是订单超时时间
+				delayDuration := time.Duration(timeoutSeconds) * time.Second
+				logger.Logger.Debug("准备发送订单超时延迟消息",
+					zap.String("order_no", orderCtx.OrderNo),
+					zap.String("order_id", orderCtx.OrderID),
+					zap.Int("timeout_seconds", timeoutSeconds),
+					zap.Duration("delay_duration", delayDuration))
+
+				if err := s.mqClient.SendDelayMessage(ctx, "order-timeout", "timeout", timeoutMsg, delayDuration); err != nil {
+					logger.Logger.Warn("发送订单超时延迟消息失败，将依赖定时扫描",
+						zap.String("order_no", orderCtx.OrderNo),
+						zap.String("order_id", orderCtx.OrderID),
+						zap.Int("timeout_seconds", timeoutSeconds),
+						zap.Int64("plugin_id", orderCtx.PluginID),
+						zap.Error(err))
+					// 失败不影响订单创建，定时扫描会作为兜底
+				} else {
+					logger.Logger.Info("订单超时延迟消息已发送",
+						zap.String("order_no", orderCtx.OrderNo),
+						zap.String("order_id", orderCtx.OrderID),
+						zap.Int("timeout_seconds", timeoutSeconds),
+						zap.Int64("plugin_id", orderCtx.PluginID),
+						zap.String("plugin_type", orderCtx.PluginType),
+						zap.Duration("delay_duration", delayDuration),
+						zap.Time("expected_expire_time", time.Now().Add(delayDuration)))
+				}
+			}
+		}
+	}
 
 	// 9. 生成支付URL（使用插件系统，此时产品已选择）
 	thirdTime := time.Now()
@@ -1463,213 +1538,69 @@ func (s *OrderService) callbackPluginSubmit(ctx context.Context, orderCtx *Order
 	return pluginInstance.CallbackSubmit(ctx, callbackReq)
 }
 
-// UpdateOrderStatus 更新订单状态，并处理预占余额和余额扣减
-// 使用事务确保一致性，并处理预占余额的释放和余额的扣减
-// 优化：从缓存获取商户信息（包含租户ID），避免在事务中查询数据库
-func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, status int, ticketNo string) error {
-	// 先查询订单信息（在事务外，减少事务时间）
-	var order models.Order
-	if err := database.DB.Select("id, merchant_id, money, order_status").
-		Where("id = ?", orderID).
-		First(&order).Error; err != nil {
-		return fmt.Errorf("订单不存在: %w", err)
-	}
+// tenantIDProviderAdapter 租户ID提供者适配器（实现 order.TenantIDProvider 接口）
+type tenantIDProviderAdapter struct {
+	cacheService *CacheService
+}
 
-	// 检查订单状态是否已经变更（避免重复处理）
-	if order.OrderStatus == status {
-		return nil // 状态未变化，直接返回
-	}
-
+func (a *tenantIDProviderAdapter) GetTenantIDByMerchantID(ctx context.Context, merchantID int64) (*int64, error) {
 	// 从缓存获取商户信息（包含租户ID），避免在事务中查询数据库
-	var tenantID *int64
-	if order.MerchantID != nil {
-		merchant, _, err := s.cacheService.GetMerchantWithUser(context.Background(), *order.MerchantID)
-		if err == nil && merchant != nil && merchant.ParentID > 0 {
-			// ParentID 是 int64 类型，不是指针，直接使用
-			tenantID = &merchant.ParentID
-		}
-		// 如果缓存未命中，降级方案：在事务外查询（但这种情况应该很少）
-		if tenantID == nil {
-			// 降级方案：在事务外查询（这种情况应该很少，因为缓存刷新服务每秒更新）
-			var merchant models.Merchant
-			if err := database.DB.Select("parent_id").Where("id = ?", *order.MerchantID).First(&merchant).Error; err == nil && merchant.ParentID > 0 {
-				tenantID = &merchant.ParentID
-			}
-		}
+	merchant, _, err := a.cacheService.GetMerchantWithUser(ctx, merchantID)
+	if err == nil && merchant != nil && merchant.ParentID > 0 {
+		// ParentID 是 int64 类型，不是指针，直接使用
+		return &merchant.ParentID, nil
 	}
-
-	// 开启事务（现在事务中只需要更新操作，不需要查询）
-	tx := database.DB.Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	now := time.Now()
-
-	// 处理租户余额（在事务中，确保一致性）
-	if tenantID != nil {
-		// 根据订单状态处理预占余额和余额
-		switch status {
-		case models.OrderStatusPaid:
-			// 订单支付成功：从数据库扣减余额，从 Redis 释放预占
-			// 先查询变更前的余额（使用 SELECT FOR UPDATE 确保一致性），用于记录流水
-			var tenant models.Tenant
-			if err := tx.Set("gorm:query_option", "FOR UPDATE").
-				Where("id = ?", *tenantID).First(&tenant).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("查询租户余额失败: %w", err)
-			}
-
-			oldBalance := tenant.Balance
-			newBalance := oldBalance - int64(order.Money)
-
-			// 使用原子操作扣减余额
-			if err := tx.Model(&models.Tenant{}).
-				Where("id = ?", *tenantID).
-				Update("balance", gorm.Expr("balance - ?", order.Money)).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("扣减租户余额失败: %w", err)
-			}
-
-			// 记录租户资金流水
-			cashflow := &models.TenantCashflow{
-				OldMoney:       oldBalance,
-				NewMoney:       newBalance,
-				ChangeMoney:    -int64(order.Money), // 负数表示扣减
-				FlowType:       models.CashflowTypeOrderDeduct,
-				OrderID:        &orderID,
-				PayChannelID:   order.PayChannelID,
-				TenantID:       *tenantID,
-				CreateDatetime: &now,
-			}
-			if err := tx.Create(cashflow).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("记录租户资金流水失败: %w", err)
-			}
-
-			// 从 Redis 释放预占余额
-			if err := s.balanceService.ReleasePreTax(ctx, *tenantID, int64(order.Money)); err != nil {
-				// 如果 Redis 释放失败，记录日志但不回滚数据库事务（数据库已扣减）
-				logger.Logger.Warn("释放预占余额失败",
-					zap.Int64("tenant_id", *tenantID),
-					zap.Int64("amount", int64(order.Money)),
-					zap.Error(err))
-			}
-		case models.OrderStatusFailed, models.OrderStatusCancelled:
-			// 订单失败/取消/过期：只从 Redis 释放预占，不扣减余额
-			if err := s.balanceService.ReleasePreTax(ctx, *tenantID, int64(order.Money)); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("释放预占余额失败: %w", err)
-			}
-			// OrderStatusGenerating 不需要处理（创建订单时已增加预占）
-		}
+	// 如果缓存未命中，降级方案：在事务外查询（但这种情况应该很少）
+	var fallbackMerchant models.Merchant
+	if err := database.DB.Select("parent_id").Where("id = ?", merchantID).First(&fallbackMerchant).Error; err == nil && fallbackMerchant.ParentID > 0 {
+		return &fallbackMerchant.ParentID, nil
 	}
+	return nil, fmt.Errorf("无法获取租户ID")
+}
 
-	// 处理码商余额（在事务中，确保一致性）
-	// 码商余额扣减逻辑与租户相同：订单支付成功时从数据库扣减余额
-	if order.WriteoffID != nil {
-		switch status {
-		case models.OrderStatusPaid:
-			// 订单支付成功：从数据库扣减码商余额
-			// 先查询变更前的余额（使用 SELECT FOR UPDATE 确保一致性），用于记录流水
-			var writeoff models.Writeoff
-			if err := tx.Set("gorm:query_option", "FOR UPDATE").
-				Where("id = ?", *order.WriteoffID).First(&writeoff).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("查询码商余额失败: %w", err)
-			}
+// preTaxReleaserAdapter 预占余额释放器适配器（实现 order.PreTaxReleaser 接口）
+type preTaxReleaserAdapter struct {
+	balanceService *BalanceService
+}
 
-			// 记录码商资金流水（无论余额是否为 NULL，都需要记录流水以便追踪）
-			var oldBalance, newBalance int64
-			if writeoff.Balance != nil {
-				// 有余额限制：扣减余额并记录实际余额变化
-				oldBalance = *writeoff.Balance
-				newBalance = oldBalance - int64(order.Money)
+func (a *preTaxReleaserAdapter) ReleasePreTax(ctx context.Context, tenantID int64, amount int64) error {
+	return a.balanceService.ReleasePreTax(ctx, tenantID, amount)
+}
 
-				// 使用原子操作扣减余额
-				if err := tx.Model(&models.Writeoff{}).
-					Where("id = ? AND balance IS NOT NULL", *order.WriteoffID).
-					Update("balance", gorm.Expr("balance - ?", order.Money)).Error; err != nil {
-					tx.Rollback()
-					return fmt.Errorf("扣减码商余额失败: %w", err)
+// UpdateOrderStatus 更新订单状态，并处理预占余额和余额扣减
+// 使用统一的 order.UpdateStatus 实现，避免代码重复
+func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, status int, ticketNo string) error {
+	// 创建适配器
+	tenantIDProvider := &tenantIDProviderAdapter{cacheService: s.cacheService}
+	preTaxReleaser := &preTaxReleaserAdapter{balanceService: s.balanceService}
+
+	// 使用统一的订单状态更新逻辑
+	err := order.UpdateStatus(ctx, order.UpdateStatusRequest{
+		OrderID:  orderID,
+		Status:   status,
+		TicketNo: ticketNo,
+	}, order.UpdateStatusOptions{
+		PreTaxReleaser:        preTaxReleaser,
+		TenantIDProvider:      tenantIDProvider,
+		HandleWriteoffBalance: true, // service 包需要处理码商余额
+	})
+
+	// 如果事务提交失败，需要回滚 Redis 中的预占余额操作
+	if err != nil && err.Error() == "提交事务失败" {
+		// 查询订单信息以获取金额和商户ID
+		var order models.Order
+		if queryErr := database.DB.Select("merchant_id, money").Where("id = ?", orderID).First(&order).Error; queryErr == nil {
+			tenantID, tenantErr := tenantIDProvider.GetTenantIDByMerchantID(ctx, *order.MerchantID)
+			if tenantErr == nil && tenantID != nil {
+				switch status {
+				case models.OrderStatusPaid, models.OrderStatusFailed, models.OrderStatusCancelled:
+					// 回滚：重新预占（因为已经释放了）
+					// 注意：数据库余额扣减已回滚（事务回滚），只需要恢复 Redis 预占
+					_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
 				}
-			} else {
-				// 余额无限制：old_money 和 new_money 都设置为 0（表示无限制）
-				// 这样仍然可以记录流水以便追踪订单使用了哪些码商
-				oldBalance = 0
-				newBalance = 0
-			}
-
-			// 记录码商资金流水
-			cashflow := &models.WriteoffCashflow{
-				OldMoney:       oldBalance,
-				NewMoney:       newBalance,
-				ChangeMoney:    -int64(order.Money), // 负数表示扣减
-				FlowType:       models.CashflowTypeOrderDeduct,
-				Tax:            0.00, // 费率，可以根据需要设置
-				OrderID:        &orderID,
-				PayChannelID:   order.PayChannelID,
-				WriteoffID:     *order.WriteoffID,
-				CreateDatetime: &now,
-			}
-			if err := tx.Create(cashflow).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("记录码商资金流水失败: %w", err)
-			}
-		case models.OrderStatusFailed, models.OrderStatusCancelled:
-			// 订单失败/取消/过期：码商余额不需要处理（码商没有预占余额的概念）
-			// 码商余额只在支付成功时扣减
-		}
-	}
-
-	// 更新订单状态（合并多个字段更新，减少数据库往返）
-	updates := map[string]interface{}{
-		"order_status":    status,
-		"update_datetime": &now,
-	}
-
-	if status == models.OrderStatusPaid {
-		updates["pay_datetime"] = &now
-	}
-
-	if err := tx.Model(&models.Order{}).
-		Where("id = ?", orderID).
-		Updates(updates).Error; err != nil {
-		tx.Rollback()
-		return fmt.Errorf("更新订单状态失败: %w", err)
-	}
-
-	// 更新订单详情的 ticket_no（如果提供）
-	// 优化：与订单状态更新合并到同一个事务中，但分开执行以便于错误处理
-	if ticketNo != "" {
-		if err := tx.Model(&models.OrderDetail{}).
-			Where("order_id = ?", orderID).
-			Update("ticket_no", ticketNo).Error; err != nil {
-			tx.Rollback()
-			return fmt.Errorf("更新订单详情失败: %w", err)
-		}
-	}
-
-	// 提交事务
-	if err := tx.Commit().Error; err != nil {
-		// 如果事务提交失败，需要回滚 Redis 中的预占余额操作
-		if tenantID != nil {
-			switch status {
-			case models.OrderStatusPaid:
-				// 回滚：重新预占（因为已经释放了）
-				// 注意：数据库余额扣减已回滚（事务回滚），只需要恢复 Redis 预占
-				_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
-			case models.OrderStatusFailed, models.OrderStatusCancelled:
-				// 回滚：重新预占（因为已经释放了）
-				_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
 			}
 		}
-		return fmt.Errorf("提交事务失败: %w", err)
 	}
 
-	// 注意：余额从数据库扣减，预占余额由 Redis 管理，缓存刷新服务会定期从数据库同步余额到 Redis
-
-	return nil
+	return err
 }

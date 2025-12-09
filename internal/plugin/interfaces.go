@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+
+	"github.com/golang-pay-core/internal/models"
 )
 
 // OrderContext 订单上下文接口，插件需要从上下文中获取信息
@@ -52,6 +54,13 @@ type PluginCapabilities interface {
 	ExtraNeedCookie() bool
 	// GetTimeout 获取订单超时时间（秒）
 	GetTimeout(ctx context.Context, pluginID int64) int
+}
+
+// PluginConfigProvider 插件配置提供者接口（避免循环依赖）
+// 用于从缓存服务获取插件配置
+type PluginConfigProvider interface {
+	// GetPluginConfigByKey 根据 key 获取插件配置
+	GetPluginConfigByKey(ctx context.Context, pluginID int64, key string) (*models.PayPluginConfig, error)
 }
 
 // CreateOrderRequest 创建订单请求

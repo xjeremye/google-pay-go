@@ -265,6 +265,39 @@ func (s *CacheService) GetWriteoffWithUser(ctx context.Context, writeoffID int64
 	return &writeoff, user, nil
 }
 
+// GetPluginConfigByKey 根据 key 获取插件配置（带缓存）
+// 使用与 PluginService 相同的缓存键和逻辑，保持一致性
+func (s *CacheService) GetPluginConfigByKey(ctx context.Context, pluginID int64, key string) (*models.PayPluginConfig, error) {
+	cacheKey := fmt.Sprintf("plugin_config:%d", pluginID)
+
+	// 尝试从缓存获取插件配置列表
+	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
+		var configs []models.PayPluginConfig
+		if err := json.Unmarshal([]byte(val), &configs); err == nil {
+			// 从配置列表中查找指定 key
+			for _, config := range configs {
+				if config.Key == key {
+					return &config, nil
+				}
+			}
+		}
+	}
+
+	// 缓存未命中，从数据库获取（只查询指定 key 的配置）
+	var config models.PayPluginConfig
+	err := database.DB.Where("parent_id = ? AND key = ? AND status = ?", pluginID, key, true).
+		First(&config).Error
+
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("配置不存在: %s", key)
+		}
+		return nil, err
+	}
+
+	return &config, nil
+}
+
 // SystemUser 系统用户模型（用于查询）
 type SystemUser struct {
 	ID       int64  `json:"id"`
