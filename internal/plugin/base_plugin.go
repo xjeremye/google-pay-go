@@ -75,6 +75,14 @@ func (p *BasePlugin) CallbackSubmit(ctx context.Context, req *CallbackSubmitRequ
 	return nil
 }
 
+// CallbackSuccess 支付成功回调（基础实现）
+// 子类应该覆盖此方法以实现具体的成功回调逻辑（如分账处理、统计更新等）
+func (p *BasePlugin) CallbackSuccess(ctx context.Context, req *CallbackSuccessRequest) error {
+	// 基础实现：什么都不做
+	// 子类可以覆盖此方法以实现分账处理、统计更新等逻辑
+	return nil
+}
+
 // 实现 PluginCapabilities 接口（可选）
 var _ PluginCapabilities = (*BasePlugin)(nil)
 

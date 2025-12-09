@@ -260,5 +260,15 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 		return fmt.Errorf("提交事务失败: %w", err)
 	}
 
+	// 如果订单状态更新为"支付成功，通知未返回"或"支付成功，通知已返回"，触发成功钩子
+	// 注意：在事务提交后异步触发，避免影响主流程
+	// 为了避免循环依赖，这里只记录日志，实际触发逻辑应该在调用方处理
+	if req.Status == models.OrderStatusPaidNoNotify || req.Status == models.OrderStatusPaid {
+		logger.Logger.Info("订单状态更新为成功，需要在调用方触发成功钩子",
+			zap.String("order_id", req.OrderID),
+			zap.Int("status", req.Status))
+		// TODO: 通过消息队列或事件系统触发成功钩子，避免循环依赖
+	}
+
 	return nil
 }

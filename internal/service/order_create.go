@@ -107,6 +107,9 @@ type OrderCreateContext struct {
 	OrderID       string
 	OrderDetailID int64 // 订单详情ID（创建后保存，避免重复查询）
 
+	// 手续费信息
+	MerchantTax int // 商户手续费（分）
+
 	// 请求信息（用于日志记录）
 	RequestMethod string // 请求方法（GET/POST）
 	RequestBody   string // 请求体（JSON字符串）
@@ -637,8 +640,20 @@ func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreat
 		return err
 	}
 
+	// 计算商户手续费（浮动前金额）
+	// 参考 Python: _order_check_merchant_channel
+	if err := s.calculateMerchantTax(ctx, orderCtx); err != nil {
+		return err
+	}
+
 	// 应用浮动加价（基于缓存的渠道信息）
 	s.applyFloatAmount(channel, orderCtx)
+
+	// 计算租户手续费（浮动后金额）
+	// 参考 Python: _order_check_tenant_channel
+	if err := s.calculateTenantTax(ctx, orderCtx); err != nil {
+		return err
+	}
 
 	orderCtx.Channel = channel
 	orderCtx.ChannelID = channelID
@@ -891,6 +906,71 @@ func (s *OrderService) checkChannelAmount(channel *models.PayChannel, orderCtx *
 	return nil
 }
 
+// calculateMerchantTax 计算商户手续费（浮动前金额）
+// 参考 Python: _order_check_merchant_channel
+// 公式: 商户手续费 = int(商户费率 * 订单金额(浮动前) / 100)
+func (s *OrderService) calculateMerchantTax(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	if orderCtx.MerchantID == 0 || orderCtx.ChannelID == 0 {
+		orderCtx.MerchantTax = 0
+		return nil
+	}
+
+	// 查询商户支付通道关联
+	var merchantChannel models.MerchantPayChannel
+	if err := database.DB.Where("merchant_id = ? AND pay_channel_id = ?", orderCtx.MerchantID, orderCtx.ChannelID).First(&merchantChannel).Error; err != nil {
+		// 如果查询失败，手续费为0（容错处理）
+		orderCtx.MerchantTax = 0
+		return nil
+	}
+
+	// 如果费率为0，手续费为0
+	if merchantChannel.Tax == 0 {
+		orderCtx.MerchantTax = 0
+		return nil
+	}
+
+	// 商户费率,浮动前,四舍五入
+	// 公式: int(商户费率 * 订单金额(浮动前) / 100)
+	tax := int(merchantChannel.Tax * float64(orderCtx.Money) / 100.0)
+	orderCtx.MerchantTax = tax
+
+	return nil
+}
+
+// calculateTenantTax 计算租户手续费（浮动后金额）
+// 参考 Python: _order_check_tenant_channel
+// 公式: 租户手续费 = max(int(通道费率 * 订单金额(浮动后) / 100 + 0.5), 1)
+func (s *OrderService) calculateTenantTax(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	if orderCtx.TenantID == 0 || orderCtx.ChannelID == 0 {
+		orderCtx.Tax = 0
+		return nil
+	}
+
+	// 查询租户通道费率
+	var channelTax models.PayChannelTax
+	if err := database.DB.Where("pay_channel_id = ? AND tenant_id = ?", orderCtx.ChannelID, orderCtx.TenantID).First(&channelTax).Error; err != nil {
+		// 如果查询失败，手续费为0（容错处理）
+		orderCtx.Tax = 0
+		return nil
+	}
+
+	// 如果费率为0，手续费为0
+	if channelTax.Tax == 0 {
+		orderCtx.Tax = 0
+		return nil
+	}
+
+	// 手续费计算公式: 浮动后金额 * 费率 / 100，四舍五入，最低扣除1分
+	// 公式: max(int(通道费率 * 订单金额(浮动后) / 100 + 0.5), 1)
+	tax := int(channelTax.Tax*float64(orderCtx.Money)/100.0 + 0.5)
+	if tax < 1 {
+		tax = 1
+	}
+	orderCtx.Tax = tax
+
+	return nil
+}
+
 // applyFloatAmount 应用浮动加价
 func (s *OrderService) applyFloatAmount(channel *models.PayChannel, orderCtx *OrderCreateContext) {
 	if channel.FloatMinMoney > 0 || channel.FloatMaxMoney > 0 {
@@ -1013,6 +1093,7 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		WriteoffID:     orderCtx.WriteoffID,
 		ProductID:      orderCtx.ProductID,
 		CookieID:       orderCtx.CookieID,
+		MerchantTax:    orderCtx.MerchantTax, // 保存商户手续费
 	}
 
 	if err := tx.Create(orderDetail).Error; err != nil {

@@ -32,6 +32,7 @@ type MerchantPayChannel struct {
 	MerchantID     int64      `gorm:"index;not null;comment:商户ID" json:"merchant_id"`
 	PayChannelID   int64      `gorm:"index;not null;comment:支付通道ID" json:"pay_channel_id"`
 	Status         int        `gorm:"not null;default:1;comment:状态" json:"status"`
+	Tax            float64    `gorm:"type:decimal(5,2);not null;default:0.00;comment:费率(百分比)" json:"tax"`
 	CreateDatetime *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
 	UpdateDatetime *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
 

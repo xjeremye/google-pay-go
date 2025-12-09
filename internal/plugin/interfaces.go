@@ -40,6 +40,9 @@ type Plugin interface {
 	// CallbackSubmit 下单回调（订单创建成功后调用）
 	// 参考 Python: BasePluginResponder.callback_submit
 	CallbackSubmit(ctx context.Context, req *CallbackSubmitRequest) error
+	// CallbackSuccess 支付成功回调（订单支付成功后调用）
+	// 参考 Python: BasePluginResponder.callback_success
+	CallbackSuccess(ctx context.Context, req *CallbackSuccessRequest) error
 }
 
 // PluginCapabilities 插件能力接口（可选实现）
@@ -185,6 +188,31 @@ type CallbackSubmitRequest struct {
 	WriteoffID     *int64 `json:"writeoff_id"`     // 核销ID
 	TenantID       int64  `json:"tenant_id"`       // 租户ID
 	CreateDatetime string `json:"create_datetime"` // 订单创建时间（格式：2006-01-02 15:04:05）
+	NotifyURL      string `json:"notify_url"`      // 通知URL
+	PluginUpstream int    `json:"plugin_upstream"` // 插件上游类型
+}
+
+// CallbackSuccessRequest 支付成功回调请求
+// 参考 Python: callback_success 的参数
+type CallbackSuccessRequest struct {
+	OrderNo        string `json:"order_no"`        // 订单号
+	OutOrderNo     string `json:"out_order_no"`    // 商户订单号
+	PluginID       int64  `json:"plugin_id"`       // 插件ID
+	Tax            int    `json:"tax"`             // 租户手续费（分）
+	MerchantTax    int    `json:"merchant_tax"`    // 商户手续费（分）
+	PluginType     string `json:"plugin_type"`     // 插件类型
+	Money          int    `json:"money"`           // 订单金额（分）
+	NotifyMoney    int    `json:"notify_money"`    // 通知金额（分）
+	RealMoney      int    `json:"real_money"`      // 实际收入 = notify_money - merchant_tax
+	OrderID        string `json:"order_id"`        // 订单数据库ID
+	ProductID      string `json:"product_id"`      // 产品ID
+	CookieID       string `json:"cookie_id"`       // Cookie ID（可选）
+	ChannelID      int64  `json:"channel_id"`      // 支付通道ID
+	MerchantID     int64  `json:"merchant_id"`     // 商户ID
+	WriteoffID     *int64 `json:"writeoff_id"`     // 核销ID
+	TenantID       int64  `json:"tenant_id"`       // 租户ID
+	CreateDatetime string `json:"create_datetime"` // 订单创建时间（格式：2006-01-02 15:04:05）
+	PayDatetime    string `json:"pay_datetime"`    // 支付时间（格式：2006-01-02 15:04:05）
 	NotifyURL      string `json:"notify_url"`      // 通知URL
 	PluginUpstream int    `json:"plugin_upstream"` // 插件上游类型
 }

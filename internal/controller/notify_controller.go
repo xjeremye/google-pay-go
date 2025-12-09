@@ -345,6 +345,9 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 		return
 	}
 
+	// 记录订单之前的状态（用于成功钩子）
+	orderBefore := order.OrderStatus
+
 	// 更新订单状态（包含 ticket_no 更新）
 	// UpdateOrderStatus 方法会在事务中更新 ticket_no，这里不需要重复更新
 	if err := c.orderService.UpdateOrderStatus(ctx, order.ID, newStatus, notifyData.TradeNo); err != nil {
@@ -353,6 +356,84 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 			zap.Int("status", newStatus),
 			zap.Error(err))
 		return
+	}
+
+	// 如果订单状态更新为"支付成功，通知未返回"，触发成功钩子
+	if newStatus == models.OrderStatusPaidNoNotify {
+		// 异步触发成功钩子（避免阻塞）
+		go func() {
+			// 重新查询订单和详情（获取最新数据，包括merchant_tax等）
+			var updatedOrder models.Order
+			var updatedDetail models.OrderDetail
+			if err := database.DB.Where("id = ?", order.ID).First(&updatedOrder).Error; err != nil {
+				logger.Logger.Error("查询订单失败，无法触发成功钩子",
+					zap.String("order_id", order.ID),
+					zap.Error(err))
+				return
+			}
+			if err := database.DB.Where("order_id = ?", order.ID).First(&updatedDetail).Error; err != nil {
+				logger.Logger.Error("查询订单详情失败，无法触发成功钩子",
+					zap.String("order_id", order.ID),
+					zap.Error(err))
+				return
+			}
+
+			// 计算实际收入
+			realMoney := updatedDetail.NotifyMoney - updatedDetail.MerchantTax
+
+			// 构建成功数据
+			successData := &service.OrderSuccessData{
+				OrderNo:        updatedOrder.OrderNo,
+				OutOrderNo:     updatedOrder.OutOrderNo,
+				Tax:            updatedOrder.Tax,
+				MerchantTax:    updatedDetail.MerchantTax,
+				Money:          updatedOrder.Money,
+				NotifyMoney:    updatedDetail.NotifyMoney,
+				RealMoney:      realMoney,
+				TenantID:       0, // 需要从订单中获取
+				MerchantID:     0, // 需要从订单中获取
+				WriteoffID:     updatedOrder.WriteoffID,
+				ChannelID:      0, // 需要从订单中获取
+				PluginID:       0, // 需要从订单详情中获取
+				ProductID:      updatedDetail.ProductID,
+				CreateDatetime: *updatedOrder.CreateDatetime,
+				PayDatetime:    time.Now(), // 使用当前时间作为支付时间
+				OrderID:        updatedOrder.ID,
+				OrderBefore:    orderBefore,
+			}
+
+			// 从订单中获取关联ID
+			if updatedOrder.MerchantID != nil {
+				successData.MerchantID = *updatedOrder.MerchantID
+			}
+			if updatedOrder.PayChannelID != nil {
+				successData.ChannelID = *updatedOrder.PayChannelID
+			}
+			if updatedDetail.PluginID != nil {
+				successData.PluginID = *updatedDetail.PluginID
+			}
+
+			// 查询租户ID（从商户的parent_id获取）
+			if updatedOrder.MerchantID != nil {
+				var merchant models.Merchant
+				if err := database.DB.Select("parent_id").Where("id = ?", *updatedOrder.MerchantID).First(&merchant).Error; err == nil {
+					successData.TenantID = merchant.ParentID
+				}
+			}
+
+			// 如果有支付时间，使用支付时间
+			if updatedOrder.PayDatetime != nil {
+				successData.PayDatetime = *updatedOrder.PayDatetime
+			}
+
+			// 触发成功钩子
+			hookService := service.NewOrderSuccessHookService()
+			if err := hookService.NotifyOrderSuccess(context.Background(), successData); err != nil {
+				logger.Logger.Error("触发订单成功钩子失败",
+					zap.String("order_id", order.ID),
+					zap.Error(err))
+			}
+		}()
 	}
 
 	// 通知商户（异步执行）

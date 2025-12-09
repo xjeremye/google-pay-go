@@ -158,6 +158,55 @@ func (p *BasePlugin) CallbackSubmit(ctx context.Context, req *plugin.CallbackSub
 	return nil
 }
 
+// CallbackSuccess 支付成功回调
+// 参考 Python: callback_success
+// 主要功能：
+// 1. 更新产品成功统计（success_count, success_money）
+// 2. 处理分账（根据collection_type）
+func (p *BasePlugin) CallbackSuccess(ctx context.Context, req *plugin.CallbackSuccessRequest) error {
+	// 1. 更新产品成功统计
+	// 解析创建时间
+	createDatetime, err := time.Parse("2006-01-02 15:04:05", req.CreateDatetime)
+	if err != nil {
+		createDatetime = time.Now()
+		logger.Logger.Warn("解析订单创建时间失败，使用当前时间",
+			zap.String("order_no", req.OrderNo),
+			zap.String("create_datetime", req.CreateDatetime),
+			zap.Error(err))
+	}
+
+	// 获取通道的 extra_arg
+	var extraArg *int
+	if req.ChannelID > 0 {
+		var channel models.PayChannel
+		if err := database.DB.Select("extra_arg").Where("id = ?", req.ChannelID).First(&channel).Error; err == nil {
+			extraArg = channel.ExtraArg
+		}
+	}
+
+	// 调用日统计服务更新成功统计
+	dayStatsService := NewDayStatisticsService()
+	if err := dayStatsService.SuccessBaseDayStatistics(ctx, req.ProductID, createDatetime, req.ChannelID, req.TenantID, extraArg, int64(req.NotifyMoney)); err != nil {
+		logger.Logger.Error("更新产品成功统计失败",
+			zap.String("order_no", req.OrderNo),
+			zap.String("product_id", req.ProductID),
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Error(err))
+		// 不返回错误，避免影响主流程
+	}
+
+	// 2. 处理分账（根据collection_type）
+	// 参考 Python: callback_success 中的分账处理逻辑
+	// 注意：分账处理逻辑比较复杂，这里先记录日志，后续可以单独实现
+	logger.Logger.Info("订单支付成功，需要处理分账",
+		zap.String("order_no", req.OrderNo),
+		zap.String("product_id", req.ProductID),
+		zap.Int64("notify_money", int64(req.NotifyMoney)))
+	// TODO: 实现分账处理逻辑（根据collection_type判断分账模式）
+
+	return nil
+}
+
 // parseProductIDInt 解析产品ID（字符串转 int64）
 func parseProductIDInt(productID string) (int64, error) {
 	if productID == "" {

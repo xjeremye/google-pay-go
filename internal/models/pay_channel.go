@@ -29,11 +29,35 @@ type PayChannel struct {
 	// 关联关系
 	Orders              []Order              `gorm:"foreignKey:PayChannelID" json:"orders,omitempty"`
 	MerchantPayChannels []MerchantPayChannel `gorm:"foreignKey:PayChannelID" json:"merchant_pay_channels,omitempty"`
+	ChannelTaxes        []PayChannelTax      `gorm:"foreignKey:PayChannelID" json:"channel_taxes,omitempty"`
 }
 
 // TableName 指定表名
 func (PayChannel) TableName() string {
 	return "dvadmin_pay_channel"
+}
+
+// PayChannelTax 支付通道费率（租户级别）
+type PayChannelTax struct {
+	ID             int64      `gorm:"primaryKey;autoIncrement" json:"id"`
+	PayChannelID   int64      `gorm:"index;not null;comment:支付通道ID" json:"pay_channel_id"`
+	TenantID       int64      `gorm:"index;not null;comment:租户ID" json:"tenant_id"`
+	Tax            float64    `gorm:"type:decimal(5,2);not null;comment:费率(百分比)" json:"tax"`
+	Status         bool       `gorm:"not null;comment:状态" json:"status"`
+	Mark           string     `gorm:"uniqueIndex;type:varchar(100);not null;comment:标志(通道id-租户id)" json:"mark"`
+	CreateDatetime *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
+	UpdateDatetime *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
+	CreatorID      *int64     `gorm:"index;comment:创建人" json:"creator_id,omitempty"`
+	Remarks        string     `gorm:"type:varchar(255);comment:备注" json:"remarks,omitempty"`
+
+	// 关联关系
+	PayChannel *PayChannel `gorm:"foreignKey:PayChannelID" json:"pay_channel,omitempty"`
+	Tenant     *Tenant     `gorm:"foreignKey:TenantID" json:"tenant,omitempty"`
+}
+
+// TableName 指定表名
+func (PayChannelTax) TableName() string {
+	return "dvadmin_pay_channel_tax"
 }
 
 // PayChannelStatus 支付通道状态
