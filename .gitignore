@@ -43,6 +43,3 @@ Thumbs.db
 docs/backend
 docs/backend/*
 
-# IP 归属地数据文件（文件较大，不提交到版本控制）
-data/*.xdb
-data/ip2region*.xdb

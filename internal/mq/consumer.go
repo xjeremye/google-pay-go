@@ -540,19 +540,24 @@ func handleBalanceSyncMessages(ctx context.Context, msg *rocketmq.MessageView) e
 	return nil
 }
 
-// Close 关闭消费者（添加超时控制，避免长时间阻塞）
+// Close 关闭消费者（优化关闭逻辑，避免长时间阻塞）
 func (c *RocketMQConsumer) Close() error {
 	if !c.enabled {
 		return nil
 	}
 
 	if c.consumer != nil {
-		// 使用 goroutine + context 实现超时控制
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		logger.Logger.Info("开始关闭 RocketMQ 消费者...")
+
+		// 使用更短的超时时间（2秒），快速关闭
+		// 如果消息处理时间较长，超时后会直接退出，不再等待
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		done := make(chan error, 1)
 		go func() {
+			// GracefulStop 会等待正在处理的消息完成
+			// 但如果消息处理时间过长，这里会超时
 			done <- c.consumer.GracefulStop()
 		}()
 
@@ -560,16 +565,20 @@ func (c *RocketMQConsumer) Close() error {
 		case err := <-done:
 			if err != nil {
 				logger.Logger.Error("关闭 RocketMQ 消费者失败", zap.Error(err))
-				return fmt.Errorf("关闭 RocketMQ 消费者失败: %w", err)
+				// 即使失败也继续关闭流程，不阻塞应用退出
+				return nil
 			}
+			logger.Logger.Info("RocketMQ 消费者已优雅关闭")
 		case <-ctx.Done():
-			logger.Logger.Warn("关闭 RocketMQ 消费者超时（5秒），强制退出", zap.Error(ctx.Err()))
-			// 超时后不返回错误，允许应用继续关闭
+			logger.Logger.Warn("关闭 RocketMQ 消费者超时（2秒），强制退出",
+				zap.Error(ctx.Err()),
+				zap.String("note", "可能仍有消息正在处理，但应用将强制退出"))
+			// 超时后直接返回，不再等待
+			// 注意：这可能导致正在处理的消息被中断，但可以快速关闭应用
 			return nil
 		}
 	}
 
-	logger.Logger.Info("RocketMQ 消费者已关闭")
 	return nil
 }
 
