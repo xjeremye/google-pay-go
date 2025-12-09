@@ -54,11 +54,27 @@ func (s *CashierService) RecordCashierVisit(ctx context.Context, orderNo string,
 	// 检测设备类型
 	deviceType := utils.DetectDeviceType(userAgent)
 
+	// 解析 IP 地址归属地（异步查询，避免阻塞）
+	ipLocation, err := utils.GetIPLocation(clientIP)
+	if err != nil {
+		logger.Logger.Warn("解析 IP 归属地失败",
+			zap.String("order_no", orderNo),
+			zap.String("ip", clientIP),
+			zap.Error(err))
+		// 失败时使用默认值
+		ipLocation = &utils.IPLocationInfo{
+			Address: "",
+			PID:     -1,
+			CID:     -1,
+		}
+	}
+
 	now := time.Now()
 
 	// 优化：使用 MySQL 的 INSERT ... ON DUPLICATE KEY UPDATE 实现 UPSERT
 	// 减少一次查询，提高性能（order_id 有唯一索引）
 	// 如果记录已存在，更新；如果不存在，创建
+	// 注意：如果归属地信息不为空，则更新；如果 IP 地址变化，也更新归属地信息
 	sql := `INSERT INTO dvadmin_order_device_detail (order_id, ip_address, device_type, device_fingerprint, user_id, create_datetime, update_datetime, address, pid, cid)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON DUPLICATE KEY UPDATE
@@ -66,6 +82,9 @@ func (s *CashierService) RecordCashierVisit(ctx context.Context, orderNo string,
 				device_type = VALUES(device_type),
 				device_fingerprint = IF(VALUES(device_fingerprint) != '', VALUES(device_fingerprint), device_fingerprint),
 				user_id = IF(VALUES(user_id) != '', VALUES(user_id), user_id),
+				address = IF(VALUES(address) != '' AND (address = '' OR address IS NULL OR ip_address != VALUES(ip_address)), VALUES(address), address),
+				pid = IF(VALUES(pid) != -1 AND (pid = -1 OR ip_address != VALUES(ip_address)), VALUES(pid), pid),
+				cid = IF(VALUES(cid) != -1 AND (cid = -1 OR ip_address != VALUES(ip_address)), VALUES(cid), cid),
 				update_datetime = VALUES(update_datetime)`
 
 	if err := database.DB.Exec(sql,
@@ -76,9 +95,9 @@ func (s *CashierService) RecordCashierVisit(ctx context.Context, orderNo string,
 		userID,
 		&now,
 		&now,
-		"", // address
-		-1, // pid
-		-1, // cid
+		ipLocation.Address, // address
+		ipLocation.PID,     // pid
+		ipLocation.CID,     // cid
 	).Error; err != nil {
 		logger.Logger.Warn("创建/更新订单设备详情失败",
 			zap.String("order_no", orderNo),
