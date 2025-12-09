@@ -1,20 +1,26 @@
-package mock
+package alipay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
+	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/plugin"
+	"github.com/golang-pay-core/internal/service"
 )
 
-// MockPlugin 模拟测试插件
+// MockPlugin 支付宝模拟插件
 // 用于压测时模拟支付宝网关延迟和回调，不调用真实API
+// 继承自 BasePlugin，保持与支付宝插件一致的行为
 type MockPlugin struct {
-	*plugin.BasePlugin
+	*BasePlugin
 	// 模拟延迟配置（毫秒）
 	MinDelay int // 最小延迟
 	MaxDelay int // 最大延迟
@@ -24,10 +30,10 @@ type MockPlugin struct {
 	CallbackDelay int
 }
 
-// NewMockPlugin 创建模拟插件
+// NewMockPlugin 创建支付宝模拟插件
 func NewMockPlugin(pluginID int64) *MockPlugin {
 	return &MockPlugin{
-		BasePlugin:       plugin.NewBasePlugin(pluginID),
+		BasePlugin:       NewBasePlugin(pluginID),
 		MinDelay:         50,   // 默认最小延迟50ms
 		MaxDelay:         200,  // 默认最大延迟200ms
 		SimulateCallback: true, // 默认启用回调模拟
@@ -36,54 +42,38 @@ func NewMockPlugin(pluginID int64) *MockPlugin {
 }
 
 // CreateOrder 创建订单（模拟）
-// 模拟支付宝网关延迟，返回模拟支付URL
+// 不真正调用支付宝API，而是模拟延迟后返回模拟支付URL
+// 如果配置了模拟回调，会异步触发回调
 func (p *MockPlugin) CreateOrder(ctx context.Context, req *plugin.CreateOrderRequest) (*plugin.CreateOrderResponse, error) {
 	// 模拟网络延迟（模拟支付宝网关响应时间）
 	delay := p.getRandomDelay()
 	time.Sleep(time.Duration(delay) * time.Millisecond)
 
-	// 生成模拟支付URL
+	// 生成模拟支付URL（格式类似支付宝）
 	// 格式：mock://pay.example.com/pay?order_no=xxx&amount=xxx
-	payURL := fmt.Sprintf("mock://pay.example.com/pay?order_no=%s&out_order_no=%s&amount=%d&plugin_type=mock",
+	payURL := fmt.Sprintf("mock://pay.example.com/pay?order_no=%s&out_order_no=%s&amount=%d&plugin_type=alipay_mock",
 		req.OrderNo, req.OutOrderNo, req.Money)
 
 	// 如果配置了模拟回调，异步触发回调
-	// 注意：需要从NotifyURL中提取回调地址，并构建正确的回调URL
-	if p.SimulateCallback && req.NotifyURL != "" {
+	if p.SimulateCallback && req.NotifyURL != "" && req.ProductID != "" {
 		go p.simulateCallback(ctx, req)
 	}
 
 	return plugin.NewSuccessResponse(payURL), nil
 }
 
-// WaitProduct 等待产品（模拟）
-// 返回模拟的产品ID和核销ID
+// WaitProduct 等待产品
+// 继承自 BasePlugin，使用真实的支付宝产品选择逻辑
 func (p *MockPlugin) WaitProduct(ctx context.Context, req *plugin.WaitProductRequest) (*plugin.WaitProductResponse, error) {
-	// 模拟产品选择延迟
-	delay := p.getRandomDelay() / 2 // 产品选择通常比支付URL生成快
-	time.Sleep(time.Duration(delay) * time.Millisecond)
-
-	// 返回模拟产品ID和核销ID
-	// 产品ID格式：MOCK_PRODUCT_{随机数}
-	// 核销ID：随机生成一个ID
-	productID := fmt.Sprintf("MOCK_PRODUCT_%d", rand.Int63n(1000)+1)
-	writeoffID := int64(rand.Intn(1000) + 1)
-
-	return plugin.NewWaitProductSuccessResponse(productID, &writeoffID, "", req.Money), nil
+	// 使用 BasePlugin 的实现，保持与真实支付宝插件一致
+	return p.BasePlugin.WaitProduct(ctx, req)
 }
 
-// CallbackSubmit 下单回调（模拟）
-// 模拟订单创建成功后的回调处理
+// CallbackSubmit 下单回调
+// 继承自 BasePlugin，使用真实的回调处理逻辑（更新订单备注、日统计等）
 func (p *MockPlugin) CallbackSubmit(ctx context.Context, req *plugin.CallbackSubmitRequest) error {
-	// 模拟回调处理延迟
-	delay := p.getRandomDelay() / 3
-	time.Sleep(time.Duration(delay) * time.Millisecond)
-
-	// 模拟回调处理逻辑（这里可以记录日志或更新统计）
-	// 实际实现中，这里可能会更新订单状态、更新统计等
-	// 但因为是模拟，我们只做延迟，不真实操作数据库
-
-	return nil
+	// 使用 BasePlugin 的实现，保持与真实支付宝插件一致
+	return p.BasePlugin.CallbackSubmit(ctx, req)
 }
 
 // getRandomDelay 获取随机延迟时间（毫秒）
@@ -106,7 +96,7 @@ func (p *MockPlugin) simulateCallback(ctx context.Context, req *plugin.CreateOrd
 	}
 
 	// 构建回调URL：从NotifyURL提取基础URL，然后构建系统回调接口
-	// 格式：{base_url}/api/pay/order/notify/mock/{product_id}/
+	// 格式：{base_url}/api/pay/order/notify/alipay_mock/{product_id}/
 	callbackURL := p.buildCallbackURL(req)
 	if callbackURL == "" {
 		return
@@ -150,8 +140,8 @@ func (p *MockPlugin) buildCallbackURL(req *plugin.CreateOrderRequest) string {
 		return ""
 	}
 
-	// 构建回调URL：/api/pay/order/notify/mock/{product_id}/
-	callbackPath := fmt.Sprintf("/api/pay/order/notify/mock/%s/", req.ProductID)
+	// 构建回调URL：/api/pay/order/notify/alipay_mock/{product_id}/
+	callbackPath := fmt.Sprintf("/api/pay/order/notify/alipay_mock/%s/", req.ProductID)
 
 	// 组合完整URL
 	callbackURL := fmt.Sprintf("%s://%s%s", notifyURL.Scheme, notifyURL.Host, callbackPath)
@@ -209,7 +199,40 @@ func (p *MockPlugin) ExtraNeedCookie() bool {
 }
 
 // GetTimeout 获取订单超时时间（秒）
+// 从数据库获取真实的超时时间配置，如果没有配置则使用默认值
 func (p *MockPlugin) GetTimeout(ctx context.Context, pluginID int64) int {
-	// 模拟订单超时时间：10分钟
-	return 600
+	// 尝试从插件配置中获取超时时间（使用缓存）
+	pluginService := service.NewPluginService()
+	pluginConfig, err := pluginService.GetPluginConfigByKey(ctx, pluginID, "timeout")
+	if err == nil && pluginConfig != nil {
+		// 解析配置值（可能是 JSON 字符串或直接的值）
+		var timeout int
+		if err := json.Unmarshal([]byte(pluginConfig.Value), &timeout); err != nil {
+			// 如果不是 JSON，尝试直接解析为整数
+			if parsed, err := strconv.Atoi(pluginConfig.Value); err == nil {
+				timeout = parsed
+			}
+		}
+		// 如果解析成功且值有效，返回配置的超时时间
+		if timeout > 0 {
+			return timeout
+		}
+	}
+
+	// 如果缓存中没有，尝试从数据库直接查询（作为备用方案）
+	var dbConfig models.PayPluginConfig
+	if err := database.DB.Where("parent_id = ? AND key = ? AND status = ?", pluginID, "timeout", true).
+		First(&dbConfig).Error; err == nil {
+		var timeout int
+		if err := json.Unmarshal([]byte(dbConfig.Value), &timeout); err == nil {
+			if timeout > 0 {
+				return timeout
+			}
+		} else if parsed, err := strconv.Atoi(dbConfig.Value); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+
+	// 如果都没有配置，使用 BasePlugin 的默认值（5分钟）
+	return p.BasePlugin.GetTimeout(ctx, pluginID)
 }

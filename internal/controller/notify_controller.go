@@ -64,8 +64,8 @@ func (c *NotifyController) AlipayNotify(ctx *gin.Context) {
 		return
 	}
 
-	// Mock插件特殊处理：不需要验证签名和产品信息
-	if pluginType == "mock" || pluginType == "mock_alipay" {
+	// alipay_mock插件特殊处理：不需要验证签名和产品信息（用于压测）
+	if pluginType == "alipay_mock" {
 		c.handleMockNotify(ctx, pluginType, productID)
 		return
 	}
@@ -210,7 +210,7 @@ func (c *NotifyController) AlipayNotify(ctx *gin.Context) {
 	ctx.String(http.StatusOK, "success")
 }
 
-// handleMockNotify 处理Mock插件回调（用于压测）
+// handleMockNotify 处理alipay_mock插件回调（用于压测）
 func (c *NotifyController) handleMockNotify(ctx *gin.Context, pluginType, productID string) {
 	// 解析回调参数（与支付宝回调格式相同）
 	var params map[string]string
@@ -249,10 +249,10 @@ func (c *NotifyController) handleMockNotify(ctx *gin.Context, pluginType, produc
 		return
 	}
 
-	// Mock插件不需要验证签名，直接解析回调数据
+	// alipay_mock插件不需要验证签名，直接解析回调数据
 	notifyData, err := alipay.ParseNotifyParams(params)
 	if err != nil {
-		logger.Logger.Warn("解析Mock回调参数失败",
+		logger.Logger.Warn("解析alipay_mock回调参数失败",
 			zap.String("product_id", productID),
 			zap.Error(err))
 		ctx.String(http.StatusBadRequest, "参数解析失败")

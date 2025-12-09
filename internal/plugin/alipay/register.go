@@ -56,6 +56,14 @@ func RegisterFaceToPlugin() {
 	})
 }
 
+// RegisterMockPlugin 注册支付宝模拟插件（用于压测）
+func RegisterMockPlugin() {
+	registry := plugin.GetRegistry()
+	registry.Register("alipay_mock", func(ctx context.Context, pluginID int64, pluginType string) (plugin.Plugin, error) {
+		return NewMockPlugin(pluginID), nil
+	})
+}
+
 // init 自动注册所有支付宝插件
 // 在包导入时自动执行，无需在 main.go 中手动调用
 // 使用 init() 函数可以保持 main.go 的简洁性
@@ -67,4 +75,5 @@ func init() {
 	RegisterPcPlugin()     // alipay_pc
 	RegisterAppPlugin()    // alipay_app
 	RegisterFaceToPlugin() // alipay_face_to
+	RegisterMockPlugin()   // alipay_mock（用于压测）
 }

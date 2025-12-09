@@ -26,9 +26,9 @@ export const options = {
 };
 
 // 测试数据配置
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
-const MERCHANT_ID = __ENV.MERCHANT_ID || '1';
-const CHANNEL_ID = __ENV.CHANNEL_ID || '1';
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8888';
+const MERCHANT_ID = __ENV.MERCHANT_ID || '20001';      // 商户ID：20001
+const CHANNEL_ID = __ENV.CHANNEL_ID || '8008';         // 支付通道ID：8008
 const MERCHANT_KEY = __ENV.MERCHANT_KEY || 'your_merchant_key';
 
 // 生成签名（与后端一致的签名算法）
@@ -67,17 +67,17 @@ export default function () {
   const amount = Math.floor(Math.random() * 100000) + 1000; // 10元到1000元
   const timestamp = Math.floor(Date.now() / 1000);
 
-  // 构建请求参数
+  // 构建请求参数（使用正式下单接口，商户ID: 20001, 通道ID: 8008）
   const params = {
-    mchId: MERCHANT_ID,
-    channelId: CHANNEL_ID,
+    mchId: parseInt(MERCHANT_ID),      // 商户ID：20001
+    channelId: parseInt(CHANNEL_ID),  // 支付通道ID：8008（使用alipay_mock插件）
     mchOrderNo: outOrderNo,
     amount: amount,
     notifyUrl: 'https://example.com/notify',
     jumpUrl: 'https://example.com/jump',
     extra: '{}',
     compatible: 0,
-    test: false, // 不使用测试模式，模拟真实下单
+    test: false, // 不使用测试模式，使用正式下单接口（通过alipay_mock插件模拟，不调用真实支付宝API）
   };
 
   // 生成签名
@@ -88,7 +88,7 @@ export default function () {
   const queryString = Object.keys(params)
     .map(key => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
     .join('&');
-  // 使用正常订单创建接口（通过mock插件模拟真实下单）
+  // 使用正式订单创建接口（通过alipay_mock插件模拟真实下单，不调用真实支付宝API）
   const url = `${BASE_URL}/api/v1/orders?${queryString}`;
 
   // 发送请求

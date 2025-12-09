@@ -19,7 +19,7 @@ import (
 // 注意：此函数已不再使用，配置逻辑已移到 init() 和 redirectRocketMQLogs()
 // 保留此函数仅用于向后兼容（如果其他地方有调用）
 func setupRocketMQLogger() {
-	os.Setenv("mq.consoleAppender.enabled", "true")
+	os.Setenv("mq.consoleAppender.enabled", "false")
 	if os.Getenv("rocketmq.client.logLevel") == "" {
 		os.Setenv("rocketmq.client.logLevel", "WARN")
 	}

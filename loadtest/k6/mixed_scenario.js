@@ -26,9 +26,9 @@ export const options = {
 };
 
 // 测试数据配置
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
-const MERCHANT_ID = __ENV.MERCHANT_ID || '1';
-const CHANNEL_ID = __ENV.CHANNEL_ID || '1';
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8888';
+const MERCHANT_ID = __ENV.MERCHANT_ID || '20001';      // 商户ID：20001
+const CHANNEL_ID = __ENV.CHANNEL_ID || '8008';         // 支付通道ID：8008
 const MERCHANT_KEY = __ENV.MERCHANT_KEY || 'your_merchant_key';
 
 // 存储已创建的订单号（用于查询测试）
@@ -71,16 +71,17 @@ function createOrder() {
   const outOrderNo = generateOutOrderNo();
   const amount = Math.floor(Math.random() * 100000) + 1000;
 
+  // 构建请求参数（使用正式下单接口，商户ID: 20001, 通道ID: 8008）
   const params = {
-    mchId: parseInt(MERCHANT_ID),
-    channelId: parseInt(CHANNEL_ID),
+    mchId: parseInt(MERCHANT_ID),      // 商户ID：20001
+    channelId: parseInt(CHANNEL_ID), // 支付通道ID：8008（使用alipay_mock插件）
     mchOrderNo: outOrderNo,
     amount: amount,
     notifyUrl: 'https://example.com/notify',
     jumpUrl: 'https://example.com/jump',
     extra: '{}',
     compatible: 0,
-    test: false, // 不使用测试模式，模拟真实下单
+    test: false, // 不使用测试模式，使用正式下单接口（通过alipay_mock插件模拟，不调用真实支付宝API）
   };
 
   const sign = generateSign(params, MERCHANT_KEY);

@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/plugin"
+	"go.uber.org/zap"
 )
 
 // getAlipayProduct 获取支付宝产品
@@ -31,6 +33,15 @@ func getAlipayProduct(ctx context.Context, req *plugin.WaitProductRequest, write
 	// )
 
 	money := req.Money
+
+	if logger.Logger != nil {
+		logger.Logger.Debug("开始查询产品",
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Int("money", money),
+			zap.Int64s("writeoff_ids", writeoffIDs),
+			zap.Int("writeoff_count", len(writeoffIDs)))
+	}
+
 	query := database.DB.Model(&models.AlipayProduct{}).
 		Where("can_pay = ?", true).
 		Where("status = ?", true).
@@ -49,8 +60,20 @@ func getAlipayProduct(ctx context.Context, req *plugin.WaitProductRequest, write
 
 	// 检查允许的支付通道
 	// Python: Q(allow_pay_channels__id=channel_id)
+	// 注意：产品必须通过关联表关联到指定的支付通道
 	query = query.Where("id IN (SELECT alipayproduct_id FROM dvadmin_alipay_product_allow_pay_channels WHERE paychannel_id = ?)",
 		req.ChannelID)
+
+	if logger.Logger != nil {
+		// 调试：检查有多少产品关联到该通道
+		var channelProductCount int64
+		database.DB.Table("dvadmin_alipay_product_allow_pay_channels").
+			Where("paychannel_id = ?", req.ChannelID).
+			Count(&channelProductCount)
+		logger.Logger.Debug("支付通道关联的产品数量",
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Int64("linked_product_count", channelProductCount))
+	}
 
 	// 先查询所有产品，然后在代码中过滤固定金额
 	// 因为 JSON 字段的查询比较复杂
@@ -60,21 +83,51 @@ func getAlipayProduct(ctx context.Context, req *plugin.WaitProductRequest, write
 
 	var products []models.AlipayProduct
 	if err := query.Find(&products).Error; err != nil {
+		if logger.Logger != nil {
+			logger.Logger.Error("查询产品失败",
+				zap.Int64("channel_id", req.ChannelID),
+				zap.Int("money", money),
+				zap.Int64s("writeoff_ids", writeoffIDs),
+				zap.Error(err))
+		}
 		return "", nil, money, fmt.Errorf("查询产品失败: %w", err)
 	}
 
 	if len(products) == 0 {
+		if logger.Logger != nil {
+			logger.Logger.Warn("未找到可用产品",
+				zap.Int64("channel_id", req.ChannelID),
+				zap.Int("money", money),
+				zap.Int64s("writeoff_ids", writeoffIDs),
+				zap.String("query_conditions", "can_pay=true, status=true, is_delete=false, writeoff_id IN writeoffIDs, 金额范围匹配, 支付通道关联"))
+		}
 		return "", nil, money, nil
+	}
+
+	if logger.Logger != nil {
+		logger.Logger.Debug("查询到产品",
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Int("money", money),
+			zap.Int("product_count", len(products)),
+			zap.Int64s("writeoff_ids", writeoffIDs))
 	}
 
 	// 遍历产品，检查各种限制
 	todayTime := time.Now().Add(-5 * time.Minute)
 	today := time.Now().Format("2006-01-02")
 
+	checkedCount := 0
 	for _, product := range products {
+		checkedCount++
 		// 检查固定金额
 		// Python: Q(settled_moneys=[]) | Q(settled_moneys__contains=[money])
 		if !checkSettledMoneys(product.SettledMoneys, money) {
+			if logger.Logger != nil {
+				logger.Logger.Debug("产品固定金额不匹配",
+					zap.Int64("product_id", product.ID),
+					zap.String("settled_moneys", product.SettledMoneys),
+					zap.Int("money", money))
+			}
 			continue
 		}
 
@@ -82,6 +135,12 @@ func getAlipayProduct(ctx context.Context, req *plugin.WaitProductRequest, write
 		if product.LimitMoney > 0 {
 			// 检查当日已收款金额+五分钟内等待支付的订单总和是否超过限额
 			if !checkDailyLimit(ctx, product.ID, req.ChannelID, product.LimitMoney, money, todayTime) {
+				if logger.Logger != nil {
+					logger.Logger.Debug("产品日限额超限",
+						zap.Int64("product_id", product.ID),
+						zap.Int("limit_money", product.LimitMoney),
+						zap.Int("money", money))
+				}
 				continue
 			}
 		}
@@ -90,6 +149,11 @@ func getAlipayProduct(ctx context.Context, req *plugin.WaitProductRequest, write
 		if product.DayCountLimit > 0 {
 			// 使用 Redis 原子计数检查日笔数限制
 			if !checkDailyCountLimit(ctx, product.ID, product.DayCountLimit, today) {
+				if logger.Logger != nil {
+					logger.Logger.Debug("产品日笔数限制超限",
+						zap.Int64("product_id", product.ID),
+						zap.Int("day_count_limit", product.DayCountLimit))
+				}
 				continue
 			}
 		}
@@ -106,9 +170,24 @@ func getAlipayProduct(ctx context.Context, req *plugin.WaitProductRequest, write
 
 		// 返回第一个符合条件的产品
 		productIDStr := fmt.Sprintf("%d", product.ID)
+		if logger.Logger != nil {
+			logger.Logger.Info("成功选择产品",
+				zap.Int64("product_id", product.ID),
+				zap.Int64("writeoff_id", product.WriteoffID),
+				zap.Int("original_money", money),
+				zap.Int("final_money", finalMoney),
+				zap.Int64("channel_id", req.ChannelID))
+		}
 		return productIDStr, &product.WriteoffID, finalMoney, nil
 	}
 
+	if logger.Logger != nil {
+		logger.Logger.Warn("所有产品都不符合条件",
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Int("money", money),
+			zap.Int("checked_product_count", checkedCount),
+			zap.Int("total_product_count", len(products)))
+	}
 	return "", nil, money, nil
 }
 

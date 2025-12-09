@@ -34,21 +34,64 @@ func (p *BasePlugin) WaitProduct(ctx context.Context, req *plugin.WaitProductReq
 	// 获取可用的核销ID列表
 	writeoffIDs, err := plugin.GetWriteoffIDsForPlugin(req.TenantID, req.Money, &req.ChannelID)
 	if err != nil {
+		if logger.Logger != nil {
+			logger.Logger.Error("获取核销ID失败",
+				zap.Int64("tenant_id", req.TenantID),
+				zap.Int64("channel_id", req.ChannelID),
+				zap.Int("money", req.Money),
+				zap.Error(err))
+		}
 		return plugin.NewWaitProductErrorResponse(7318, fmt.Sprintf("获取核销ID失败: %v", err)), nil
 	}
 	if len(writeoffIDs) == 0 {
+		if logger.Logger != nil {
+			logger.Logger.Warn("没有可选核销",
+				zap.Int64("tenant_id", req.TenantID),
+				zap.Int64("channel_id", req.ChannelID),
+				zap.Int("money", req.Money))
+		}
 		return plugin.NewWaitProductErrorResponse(7318, "没有可选核销"), nil
+	}
+
+	if logger.Logger != nil {
+		logger.Logger.Debug("获取到可用核销ID",
+			zap.Int64("tenant_id", req.TenantID),
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Int("money", req.Money),
+			zap.Int64s("writeoff_ids", writeoffIDs))
 	}
 
 	// 获取产品（通用实现：支付宝产品）
 	productID, writeoffID, money, err := getAlipayProduct(ctx, req, writeoffIDs)
 	if err != nil {
+		if logger.Logger != nil {
+			logger.Logger.Error("获取产品失败",
+				zap.Int64("tenant_id", req.TenantID),
+				zap.Int64("channel_id", req.ChannelID),
+				zap.Int("money", req.Money),
+				zap.Int64s("writeoff_ids", writeoffIDs),
+				zap.Error(err))
+		}
 		return plugin.NewWaitProductErrorResponse(7318, fmt.Sprintf("获取产品失败: %v", err)), nil
 	}
 	if productID == "" {
+		if logger.Logger != nil {
+			logger.Logger.Warn("无货物库存",
+				zap.Int64("tenant_id", req.TenantID),
+				zap.Int64("channel_id", req.ChannelID),
+				zap.Int("money", req.Money),
+				zap.Int64s("writeoff_ids", writeoffIDs),
+				zap.String("reason", "查询到0个产品或所有产品都不符合条件"))
+		}
 		return plugin.NewWaitProductErrorResponse(7318, "无货物库存"), nil
 	}
 	if writeoffID == nil {
+		if logger.Logger != nil {
+			logger.Logger.Warn("无核销库存",
+				zap.Int64("tenant_id", req.TenantID),
+				zap.Int64("channel_id", req.ChannelID),
+				zap.String("product_id", productID))
+		}
 		return plugin.NewWaitProductErrorResponse(7318, "无核销库存"), nil
 	}
 	return plugin.NewWaitProductSuccessResponse(productID, writeoffID, "", money), nil

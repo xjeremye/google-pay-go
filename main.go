@@ -29,8 +29,7 @@ import (
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/mq"
-	_ "github.com/golang-pay-core/internal/plugin/alipay" // 导入以触发自动注册
-	_ "github.com/golang-pay-core/internal/plugin/mock"   // 导入模拟插件（用于压测）
+	_ "github.com/golang-pay-core/internal/plugin/alipay" // 导入以触发自动注册（包含 alipay_mock）
 	"github.com/golang-pay-core/internal/router"
 	"github.com/golang-pay-core/internal/service"
 	"go.uber.org/zap"
