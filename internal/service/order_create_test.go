@@ -425,14 +425,6 @@ func TestOrderService_buildResponse(t *testing.T) {
 	assert.Equal(t, "TEST001", response.MchOrderNo)
 	assert.Equal(t, "PAY20240101120000001", response.PayOrderID)
 	assert.Equal(t, payURL, response.PayURL2)
-	// 注意：响应签名使用所有字段，不限制 useList
-	// 如果 SignKey 不为空，应该生成签名
-	if orderCtx.SignKey != "" {
-		// 验证签名格式（MD5 32位大写）
-		if response.Sign != "" {
-			assert.Len(t, response.Sign, 32)
-		}
-	}
 
 	// 测试兼容模式
 	orderCtx.Compatible = 1

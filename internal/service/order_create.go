@@ -59,7 +59,6 @@ type CreateOrderResponse struct {
 	MchOrderNo string `json:"mchOrderNo,omitempty"`
 	PayOrderID string `json:"payOrderId,omitempty"`
 	PayURL2    string `json:"payUrl,omitempty"`
-	Sign       string `json:"sign,omitempty"`
 }
 
 // OrderCreateContext 订单创建上下文
@@ -148,11 +147,9 @@ type OrderService struct {
 func NewOrderService() *OrderService {
 	pluginMgr := plugin.NewManager(database.RDB)
 
-	// 初始化 RocketMQ 客户端（如果启用）
-	mqClient, err := mq.NewRocketMQClient()
-	if err != nil {
-		logger.Logger.Warn("初始化 RocketMQ 客户端失败，将使用同步处理",
-			zap.Error(err))
+	// 使用全局 RocketMQ 客户端（单例模式，避免重复创建）
+	mqClient := mq.GetGlobalMQClient()
+	if !mqClient.IsEnabled() {
 		mqClient = nil
 	}
 	pluginSvc := NewPluginService()
@@ -236,6 +233,9 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 	if err := s.validateSign(ctx, orderCtx, req.RawSignData); err != nil {
 		return nil, err
 	}
+	// 将验证后的签名信息回传到 req，供 Controller 层记录日志使用
+	req.SignRaw = orderCtx.SignRaw
+	req.Sign = orderCtx.Sign
 	if err := s.validateOutOrderNo(ctx, orderCtx); err != nil {
 		return nil, err
 	}
@@ -1371,15 +1371,6 @@ func (s *OrderService) buildResponse(orderCtx *OrderCreateContext, payURL string
 		response.MchOrderNo = orderCtx.OutOrderNo
 		response.PayOrderID = orderCtx.OrderNo
 		response.PayURL2 = payURL
-
-		// 生成响应签名
-		dataMap := map[string]interface{}{
-			"mchOrderNo": response.MchOrderNo,
-			"payOrderId": response.PayOrderID,
-			"payUrl":     response.PayURL2,
-		}
-		// 响应签名使用所有字段（useList 为 nil 表示使用所有字段）
-		response.Sign = utils.GenerateResponseSign(dataMap, orderCtx.SignKey, orderCtx.Compatible)
 	}
 
 	return response

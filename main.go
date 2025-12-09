@@ -92,6 +92,17 @@ func main() {
 	go notifyRetryService.Start(refreshCtx)
 	logger.Logger.Info("通知重试服务已启动（每30秒检查一次失败的通知）")
 
+	// 初始化全局 RocketMQ 生产者客户端（单例模式，避免重复创建）
+	mqProducer := mq.GetGlobalMQClient()
+	if mqProducer.IsEnabled() {
+		logger.Logger.Info("RocketMQ 生产者已启动")
+		defer func() {
+			if err := mqProducer.Close(); err != nil {
+				logger.Logger.Error("关闭 RocketMQ 生产者失败", zap.Error(err))
+			}
+		}()
+	}
+
 	// 初始化 RocketMQ 消费者（如果启用）
 	mqConsumer, err := mq.NewRocketMQConsumer()
 	if err != nil {

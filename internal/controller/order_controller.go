@@ -163,8 +163,8 @@ func (c *OrderController) recordOrderLogSuccess(ctx context.Context, req *servic
 	now := time.Now()
 	orderLog := &models.OrderLog{
 		OutOrderNo:     req.OutOrderNo,
-		SignRaw:        req.SignRaw, // JSON 格式的原始签名数据
-		Sign:           "",          // 如果 validateSign 已执行，Service 层会设置这个值
+		SignRaw:        req.SignRaw, // 用于签名的原始字符串（由 Service 层 validateSign 设置）
+		Sign:           req.Sign,    // 验证后的签名（由 Service 层 validateSign 设置）
 		RequestBody:    req.RequestBody,
 		RequestMethod:  req.RequestMethod,
 		ResponseCode:   "200",

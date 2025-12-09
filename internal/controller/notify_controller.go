@@ -27,11 +27,9 @@ type NotifyController struct {
 
 // NewNotifyController 创建回调控制器
 func NewNotifyController() *NotifyController {
-	// 初始化 RocketMQ 客户端（如果启用）
-	mqClient, err := mq.NewRocketMQClient()
-	if err != nil {
-		logger.Logger.Warn("初始化 RocketMQ 客户端失败，回调将使用同步处理",
-			zap.Error(err))
+	// 使用全局 RocketMQ 客户端（单例模式，避免重复创建）
+	mqClient := mq.GetGlobalMQClient()
+	if !mqClient.IsEnabled() {
 		mqClient = nil
 	}
 

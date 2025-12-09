@@ -132,14 +132,29 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 		}, nil // 返回禁用状态的消费者，不返回错误
 	}
 
-	// 启动消费者（使用 defer recover 捕获可能的 panic）
+	// 启动消费者（添加超时控制，避免长时间阻塞）
 	startErr := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("启动 RocketMQ 消费者时发生 panic: %v", r)
 			}
 		}()
-		return consumer.Start()
+
+		// 使用 goroutine + context 实现超时控制
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- consumer.Start()
+		}()
+
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			return fmt.Errorf("启动 RocketMQ 消费者超时（10秒）: %w", ctx.Err())
+		}
 	}()
 
 	if startErr != nil {
@@ -525,15 +540,32 @@ func handleBalanceSyncMessages(ctx context.Context, msg *rocketmq.MessageView) e
 	return nil
 }
 
-// Close 关闭消费者
+// Close 关闭消费者（添加超时控制，避免长时间阻塞）
 func (c *RocketMQConsumer) Close() error {
 	if !c.enabled {
 		return nil
 	}
 
 	if c.consumer != nil {
-		if err := c.consumer.GracefulStop(); err != nil {
-			return fmt.Errorf("关闭 RocketMQ 消费者失败: %w", err)
+		// 使用 goroutine + context 实现超时控制
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- c.consumer.GracefulStop()
+		}()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				logger.Logger.Error("关闭 RocketMQ 消费者失败", zap.Error(err))
+				return fmt.Errorf("关闭 RocketMQ 消费者失败: %w", err)
+			}
+		case <-ctx.Done():
+			logger.Logger.Warn("关闭 RocketMQ 消费者超时（5秒），强制退出", zap.Error(ctx.Err()))
+			// 超时后不返回错误，允许应用继续关闭
+			return nil
 		}
 	}
 

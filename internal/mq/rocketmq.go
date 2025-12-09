@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	rocketmq "github.com/apache/rocketmq-clients/golang/v5"
@@ -67,10 +68,33 @@ func init() {
 	rocketmq.ResetLogger()
 }
 
+var (
+	// globalMQClient 全局 RocketMQ 生产者客户端实例（单例模式）
+	globalMQClient *RocketMQClient
+	// globalMQClientInit 用于确保全局客户端只初始化一次
+	globalMQClientInit sync.Once
+)
+
 // RocketMQClient RocketMQ 客户端封装
 type RocketMQClient struct {
 	producer rocketmq.Producer
 	enabled  bool
+}
+
+// GetGlobalMQClient 获取全局 RocketMQ 客户端实例（单例模式）
+func GetGlobalMQClient() *RocketMQClient {
+	globalMQClientInit.Do(func() {
+		client, err := NewRocketMQClient()
+		if err != nil {
+			if logger.Logger != nil {
+				logger.Logger.Warn("初始化全局 RocketMQ 客户端失败", zap.Error(err))
+			}
+			globalMQClient = &RocketMQClient{enabled: false}
+		} else {
+			globalMQClient = client
+		}
+	})
+	return globalMQClient
 }
 
 // NewRocketMQClient 创建 RocketMQ 客户端
@@ -135,14 +159,29 @@ func NewRocketMQClient() (*RocketMQClient, error) {
 		}, nil // 返回禁用状态的客户端，不返回错误
 	}
 
-	// 启动生产者（使用 defer recover 捕获可能的 panic）
+	// 启动生产者（添加超时控制，避免长时间阻塞）
 	startErr := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("启动 RocketMQ 生产者时发生 panic: %v", r)
 			}
 		}()
-		return producer.Start()
+
+		// 使用 goroutine + context 实现超时控制
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- producer.Start()
+		}()
+
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			return fmt.Errorf("启动 RocketMQ 生产者超时（10秒）: %w", ctx.Err())
+		}
 	}()
 
 	if startErr != nil {
@@ -276,18 +315,36 @@ func (c *RocketMQClient) SendDelayMessage(ctx context.Context, topic, tag string
 	return nil
 }
 
-// Close 关闭客户端
+// Close 关闭客户端（添加超时控制，避免长时间阻塞）
 func (c *RocketMQClient) Close() error {
 	if !c.enabled {
 		return nil
 	}
 
 	if c.producer != nil {
-		if err := c.producer.GracefulStop(); err != nil {
-			if logger.Logger != nil {
-				logger.Logger.Error("关闭 RocketMQ 生产者失败", zap.Error(err))
+		// 使用 goroutine + context 实现超时控制
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- c.producer.GracefulStop()
+		}()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				if logger.Logger != nil {
+					logger.Logger.Error("关闭 RocketMQ 生产者失败", zap.Error(err))
+				}
+				return fmt.Errorf("关闭 RocketMQ 生产者失败: %w", err)
 			}
-			return fmt.Errorf("关闭 RocketMQ 生产者失败: %w", err)
+		case <-ctx.Done():
+			if logger.Logger != nil {
+				logger.Logger.Warn("关闭 RocketMQ 生产者超时（5秒），强制退出", zap.Error(ctx.Err()))
+			}
+			// 超时后不返回错误，允许应用继续关闭
+			return nil
 		}
 	}
 
