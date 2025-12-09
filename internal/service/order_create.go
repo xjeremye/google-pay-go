@@ -13,6 +13,7 @@ import (
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
+	"github.com/golang-pay-core/internal/mq"
 	"github.com/golang-pay-core/internal/plugin"
 	"github.com/golang-pay-core/internal/utils"
 	"go.uber.org/zap"
@@ -140,11 +141,20 @@ type OrderService struct {
 	pluginManager  *plugin.Manager
 	balanceService *BalanceService
 	redis          *redis.Client
+	mqClient       *mq.RocketMQClient // RocketMQ 客户端（可选，如果未启用则使用同步处理）
 }
 
 // NewOrderService 创建订单服务
 func NewOrderService() *OrderService {
 	pluginMgr := plugin.NewManager(database.RDB)
+
+	// 初始化 RocketMQ 客户端（如果启用）
+	mqClient, err := mq.NewRocketMQClient()
+	if err != nil {
+		logger.Logger.Warn("初始化 RocketMQ 客户端失败，将使用同步处理",
+			zap.Error(err))
+		mqClient = nil
+	}
 	pluginSvc := NewPluginService()
 
 	// 设置插件信息提供者（实现 PluginInfoProvider 接口）
@@ -156,6 +166,7 @@ func NewOrderService() *OrderService {
 		pluginManager:  pluginMgr,
 		balanceService: NewBalanceService(),
 		redis:          database.RDB,
+		mqClient:       mqClient,
 	}
 }
 
@@ -363,18 +374,70 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 	// s.updateOrderLogResponse(ctx, orderCtx, response)
 
 	// 11. 异步调用 callback_submit（下单回调）
-	// 参考 Python: notify_order_submit 通过调度器异步调用
-	// 延迟 500 微秒执行，确保订单数据已完全写入
-	go func() {
-		// 延迟执行，确保订单数据已完全写入
-		time.Sleep(500 * time.Microsecond)
-		if err := s.callbackPluginSubmit(context.Background(), orderCtx); err != nil {
-			logger.Logger.Error("插件 callback_submit 触发错误",
+	// 如果启用了 RocketMQ，使用消息队列；否则使用 goroutine
+	if s.mqClient != nil && s.mqClient.IsEnabled() {
+		// 使用 RocketMQ 发送消息（延迟 500 微秒，确保订单数据已完全写入）
+		msg := &mq.CallbackSubmitMessage{
+			OrderNo:        orderCtx.OrderNo,
+			OutOrderNo:     orderCtx.OutOrderNo,
+			PluginID:       orderCtx.PluginID,
+			Tax:            orderCtx.Tax,
+			PluginType:     orderCtx.PluginType,
+			Money:          orderCtx.Money,
+			DomainID:       orderCtx.DomainID,
+			NotifyMoney:    orderCtx.NotifyMoney,
+			OrderID:        orderCtx.OrderID,
+			ProductID:      orderCtx.ProductID,
+			CookieID:       orderCtx.CookieID,
+			ChannelID:      orderCtx.ChannelID,
+			MerchantID:     orderCtx.MerchantID,
+			WriteoffID:     orderCtx.WriteoffID,
+			TenantID:       orderCtx.TenantID,
+			CreateDatetime: time.Now().Format("2006-01-02 15:04:05"),
+			NotifyURL:      orderCtx.NotifyURL,
+			PluginUpstream: orderCtx.PluginUpstream,
+		}
+
+		// 查询订单创建时间（如果订单已创建）
+		if orderCtx.OrderID != "" {
+			var order models.Order
+			if err := database.DB.Select("create_datetime").Where("id = ?", orderCtx.OrderID).First(&order).Error; err == nil {
+				if order.CreateDatetime != nil {
+					msg.CreateDatetime = order.CreateDatetime.Format("2006-01-02 15:04:05")
+				}
+			}
+		}
+
+		// 发送延迟消息（500 微秒延迟）
+		if err := s.mqClient.SendDelayMessage(ctx, "callback-submit", "submit", msg, 500*time.Microsecond); err != nil {
+			logger.Logger.Error("发送 callback_submit 消息失败，降级为同步处理",
 				zap.String("order_no", orderCtx.OrderNo),
 				zap.String("plugin_type", orderCtx.PluginType),
 				zap.Error(err))
+			// 降级为同步处理
+			go func() {
+				time.Sleep(500 * time.Microsecond)
+				if err := s.callbackPluginSubmit(context.Background(), orderCtx); err != nil {
+					logger.Logger.Error("插件 callback_submit 触发错误",
+						zap.String("order_no", orderCtx.OrderNo),
+						zap.String("plugin_type", orderCtx.PluginType),
+						zap.Error(err))
+				}
+			}()
 		}
-	}()
+	} else {
+		// 未启用 RocketMQ，使用 goroutine（原有逻辑）
+		go func() {
+			// 延迟执行，确保订单数据已完全写入
+			time.Sleep(500 * time.Microsecond)
+			if err := s.callbackPluginSubmit(context.Background(), orderCtx); err != nil {
+				logger.Logger.Error("插件 callback_submit 触发错误",
+					zap.String("order_no", orderCtx.OrderNo),
+					zap.String("plugin_type", orderCtx.PluginType),
+					zap.Error(err))
+			}
+		}()
+	}
 
 	return response, nil
 }
@@ -1341,6 +1404,11 @@ func (s *OrderService) GetOrderByOrderNo(orderNo string) (*models.Order, error) 
 	return &order, nil
 }
 
+// GetPluginManager 获取插件管理器（供消费者使用）
+func (s *OrderService) GetPluginManager() *plugin.Manager {
+	return s.pluginManager
+}
+
 // GetOrderByOutOrderNo 根据商户订单号获取订单
 func (s *OrderService) GetOrderByOutOrderNo(outOrderNo string, merchantID int64) (*models.Order, error) {
 	var order models.Order
@@ -1563,12 +1631,6 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, st
 			// 订单失败/取消/过期：码商余额不需要处理（码商没有预占余额的概念）
 			// 码商余额只在支付成功时扣减
 		}
-	}
-
-	// 先更新版本号（使用原子操作）
-	if err := tx.Exec("UPDATE dvadmin_order SET ver = ver + 1 WHERE id = ?", orderID).Error; err != nil {
-		tx.Rollback()
-		return fmt.Errorf("更新版本号失败: %w", err)
 	}
 
 	// 更新订单状态（合并多个字段更新，减少数据库往返）

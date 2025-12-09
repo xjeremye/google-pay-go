@@ -17,6 +17,7 @@ type Config struct {
 	Redis      RedisConfig      `mapstructure:"redis"`
 	Log        LogConfig        `mapstructure:"log"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
+	RocketMQ   RocketMQConfig   `mapstructure:"rocketmq"`
 }
 
 // AppConfig 应用配置
@@ -70,6 +71,18 @@ type MonitoringConfig struct {
 	MetricsToken       string   `mapstructure:"metrics_token"`        // Prometheus 指标端点 Token
 	MetricsIPWhitelist []string `mapstructure:"metrics_ip_whitelist"` // Prometheus 指标端点 IP 白名单
 	SwaggerEnabled     bool     `mapstructure:"swagger_enabled"`      // 是否启用 Swagger（生产环境可关闭）
+}
+
+// RocketMQConfig RocketMQ 配置
+type RocketMQConfig struct {
+	Enabled       bool     `mapstructure:"enabled"`        // 是否启用 RocketMQ
+	Endpoint      string   `mapstructure:"endpoint"`       // RocketMQ 端点（IP 或域名）
+	Port          int      `mapstructure:"port"`           // RocketMQ 端口（gRPC 端口，默认 8081）
+	AccessKey     string   `mapstructure:"access_key"`     // 访问密钥（如果启用 ACL）
+	AccessSecret  string   `mapstructure:"access_secret"`  // 访问密钥（如果启用 ACL）
+	ProducerGroup string   `mapstructure:"producer_group"` // 生产者组名
+	ConsumerGroup string   `mapstructure:"consumer_group"` // 消费者组名
+	Topics        []string `mapstructure:"topics"`         // 主题列表
 }
 
 // Load 加载配置文件
@@ -129,6 +142,11 @@ func setDefaults() {
 	viper.SetDefault("redis.pool_size", 10)
 	viper.SetDefault("log.level", "info")
 	viper.SetDefault("monitoring.swagger_enabled", true)
+	viper.SetDefault("rocketmq.enabled", false)
+	viper.SetDefault("rocketmq.endpoint", "localhost")
+	viper.SetDefault("rocketmq.port", 8081)
+	viper.SetDefault("rocketmq.producer_group", "pay-producer")
+	viper.SetDefault("rocketmq.consumer_group", "pay-consumer")
 }
 
 // GetDSN 获取数据库连接字符串
@@ -140,4 +158,9 @@ func (c *DatabaseConfig) GetDSN() string {
 // GetAddr 获取 Redis 地址
 func (c *RedisConfig) GetAddr() string {
 	return fmt.Sprintf("%s:%d", c.Host, c.Port)
+}
+
+// GetConfig 获取全局配置
+func GetConfig() *Config {
+	return Cfg
 }

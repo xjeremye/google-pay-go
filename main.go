@@ -28,6 +28,7 @@ import (
 	"github.com/golang-pay-core/config"
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
+	"github.com/golang-pay-core/internal/mq"
 	_ "github.com/golang-pay-core/internal/plugin/alipay" // 导入以触发自动注册
 	"github.com/golang-pay-core/internal/router"
 	"github.com/golang-pay-core/internal/service"
@@ -94,6 +95,20 @@ func main() {
 	notifyRetryService := service.NewNotifyRetryService()
 	go notifyRetryService.Start(refreshCtx)
 	logger.Logger.Info("通知重试服务已启动（每30秒检查一次失败的通知）")
+
+	// 初始化 RocketMQ 消费者（如果启用）
+	mqConsumer, err := mq.NewRocketMQConsumer()
+	if err != nil {
+		logger.Logger.Warn("初始化 RocketMQ 消费者失败",
+			zap.Error(err))
+	} else if mqConsumer.IsEnabled() {
+		logger.Logger.Info("RocketMQ 消费者已启动")
+		defer func() {
+			if err := mqConsumer.Close(); err != nil {
+				logger.Logger.Error("关闭 RocketMQ 消费者失败", zap.Error(err))
+			}
+		}()
+	}
 
 	// 设置路由
 	r := router.SetupRouter()

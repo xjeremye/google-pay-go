@@ -53,3 +53,18 @@ monitoring:
     - "::1"                      # IPv6 本地访问
     # - "192.168.1.0/24"         # 内网段（取消注释启用）
   swagger_enabled: true          # 是否启用 Swagger（生产环境建议设为 false）
+
+# RocketMQ 配置（用于异步消息处理，提升吞吐量）
+rocketmq:
+  enabled: false                 # 是否启用 RocketMQ（需要 RocketMQ 5.0+ 并启用 gRPC Proxy）
+  endpoint: localhost            # RocketMQ 端点
+  port: 8081                     # gRPC 端口（默认 8081）
+  access_key: ""                 # 访问密钥（如果启用 ACL，否则留空）
+  access_secret: ""              # 访问密钥（如果启用 ACL，否则留空）
+  producer_group: "pay-producer" # 生产者组名
+  consumer_group: "pay-consumer" # 消费者组名
+  topics:                        # 主题列表
+    - "callback-submit"         # 插件回调提交主题
+    - "order-notify"            # 订单通知主题
+    - "day-statistics"          # 日统计数据更新主题
+    - "alipay-notify"           # 支付宝回调主题

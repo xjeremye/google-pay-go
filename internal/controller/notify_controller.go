@@ -2,14 +2,17 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-pay-core/internal/alipay"
 	"github.com/golang-pay-core/internal/database"
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
+	"github.com/golang-pay-core/internal/mq"
 	"github.com/golang-pay-core/internal/service"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -19,13 +22,23 @@ import (
 type NotifyController struct {
 	orderService  *service.OrderService
 	notifyService *service.OrderNotifyService
+	mqClient      *mq.RocketMQClient // RocketMQ 客户端（可选）
 }
 
 // NewNotifyController 创建回调控制器
 func NewNotifyController() *NotifyController {
+	// 初始化 RocketMQ 客户端（如果启用）
+	mqClient, err := mq.NewRocketMQClient()
+	if err != nil {
+		logger.Logger.Warn("初始化 RocketMQ 客户端失败，回调将使用同步处理",
+			zap.Error(err))
+		mqClient = nil
+	}
+
 	return &NotifyController{
 		orderService:  service.NewOrderService(),
 		notifyService: service.NewOrderNotifyService(),
+		mqClient:      mqClient,
 	}
 }
 
@@ -132,8 +145,60 @@ func (c *NotifyController) AlipayNotify(ctx *gin.Context) {
 		return
 	}
 
-	// 处理回调（异步执行，不阻塞响应）
-	go c.handleAlipayNotify(context.Background(), notifyData, productID)
+	// 如果启用了 RocketMQ，使用消息队列处理；否则使用 goroutine
+	if c.mqClient != nil && c.mqClient.IsEnabled() {
+		// 构建支付宝回调消息
+		notifyMsg := &mq.AlipayNotifyMessage{
+			PluginType: pluginType,
+			ProductID:  productID,
+			Params:     params, // 保留原始参数（包含签名）
+			NotifyData: &mq.AlipayNotifyData{
+				OutTradeNo:    notifyData.OutTradeNo,
+				TradeNo:       notifyData.TradeNo,
+				TradeStatus:   notifyData.TradeStatus,
+				TotalAmount:   notifyData.TotalAmount,
+				ReceiptAmount: 0,  // 如果回调中有，可以从 params 解析
+				BuyerID:       "", // 如果回调中有，可以从 params 解析
+				BuyerLogonID:  "", // 如果回调中有，可以从 params 解析
+				SellerID:      "", // 如果回调中有，可以从 params 解析
+				GmtPayment:    "", // 如果回调中有，可以从 params 解析
+			},
+			ReceivedAt: time.Now().Format("2006-01-02 15:04:05"),
+		}
+
+		// 解析更多字段（如果存在）
+		if buyerID, ok := params["buyer_id"]; ok {
+			notifyMsg.NotifyData.BuyerID = buyerID
+		}
+		if buyerLogonID, ok := params["buyer_logon_id"]; ok {
+			notifyMsg.NotifyData.BuyerLogonID = buyerLogonID
+		}
+		if sellerID, ok := params["seller_id"]; ok {
+			notifyMsg.NotifyData.SellerID = sellerID
+		}
+		if gmtPayment, ok := params["gmt_payment"]; ok {
+			notifyMsg.NotifyData.GmtPayment = gmtPayment
+		}
+		if receiptAmount, ok := params["receipt_amount"]; ok {
+			var amount float64
+			if _, err := fmt.Sscanf(receiptAmount, "%f", &amount); err == nil {
+				notifyMsg.NotifyData.ReceiptAmount = int(amount * 100)
+			}
+		}
+
+		// 发送消息到 RocketMQ
+		if err := c.mqClient.SendMessage(ctx.Request.Context(), "alipay-notify", "notify", notifyMsg); err != nil {
+			logger.Logger.Error("发送支付宝回调消息失败，降级为同步处理",
+				zap.String("product_id", productID),
+				zap.String("out_trade_no", notifyData.OutTradeNo),
+				zap.Error(err))
+			// 降级为同步处理
+			go c.handleAlipayNotify(context.Background(), notifyData, productID)
+		}
+	} else {
+		// 未启用 RocketMQ，使用 goroutine（原有逻辑）
+		go c.handleAlipayNotify(context.Background(), notifyData, productID)
+	}
 
 	// 立即返回 success（支付宝要求）
 	ctx.String(http.StatusOK, "success")
