@@ -3,7 +3,7 @@ app:
   name: golang-pay-core
   version: 1.0.0
   mode: debug              # 开发环境使用 debug 模式
-  port: 8080
+  port: 8888
   read_timeout: 30s
   write_timeout: 30s
 
@@ -38,7 +38,7 @@ log:
   level: info # debug, info, warn, error
   format: json # json, text
   output: stdout # stdout, file
-  file_path: logs/app.log
+  file_path: ./logs/app.log
   max_size: 100 # MB
   max_backups: 7
   max_age: 30 # days
@@ -56,15 +56,18 @@ monitoring:
 
 # RocketMQ 配置（用于异步消息处理，提升吞吐量）
 rocketmq:
-  enabled: false                 # 是否启用 RocketMQ（需要 RocketMQ 5.0+ 并启用 gRPC Proxy）
+  enabled: true                # 是否启用 RocketMQ（需要 RocketMQ 5.0+ 并启用 gRPC Proxy）
   endpoint: localhost            # RocketMQ 端点
   port: 8081                     # gRPC 端口（默认 8081）
   access_key: ""                 # 访问密钥（如果启用 ACL，否则留空）
   access_secret: ""              # 访问密钥（如果启用 ACL，否则留空）
   producer_group: "pay-producer" # 生产者组名
   consumer_group: "pay-consumer" # 消费者组名
+  log_level: "WARN"             # SDK 日志级别（DEBUG, INFO, WARN, ERROR），默认 WARN（减少日志输出）
   topics:                        # 主题列表
     - "callback-submit"         # 插件回调提交主题
     - "order-notify"            # 订单通知主题
     - "day-statistics"          # 日统计数据更新主题
     - "alipay-notify"           # 支付宝回调主题
+    - "cache-refresh"           # 缓存刷新触发主题（替代定时器）
+    - "balance-sync"            # 后台调额后余额同步主题

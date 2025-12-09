@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	rocketmq "github.com/apache/rocketmq-clients/golang/v5"
@@ -18,6 +19,8 @@ import (
 	"gorm.io/gorm"
 )
 
+// init 函数已在 rocketmq.go 中定义，这里不需要重复配置
+
 // RocketMQConsumer RocketMQ 消费者
 type RocketMQConsumer struct {
 	consumer rocketmq.PushConsumer
@@ -27,6 +30,10 @@ type RocketMQConsumer struct {
 // NewRocketMQConsumer 创建 RocketMQ 消费者
 func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 	cfg := config.GetConfig()
+
+	// 确保 RocketMQ SDK 的日志已重定向到我们的 logger
+	// redirectRocketMQLogs 在 rocketmq.go 中定义
+	redirectRocketMQLogs()
 
 	// 检查是否启用 RocketMQ
 	if !cfg.RocketMQ.Enabled {
@@ -39,19 +46,16 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 	// 创建消费者配置
 	endpoint := fmt.Sprintf("%s:%d", cfg.RocketMQ.Endpoint, cfg.RocketMQ.Port)
 
-	// 构建凭证（如果启用 ACL）
-	var creds *credentials.SessionCredentials
-	if cfg.RocketMQ.AccessKey != "" && cfg.RocketMQ.AccessSecret != "" {
-		creds = &credentials.SessionCredentials{
-			AccessKey:    cfg.RocketMQ.AccessKey,
-			AccessSecret: cfg.RocketMQ.AccessSecret,
-		}
+	// 构建凭证（RocketMQ SDK 要求 Credentials 不能为 nil，即使不使用 ACL 也需要提供）
+	creds := &credentials.SessionCredentials{
+		AccessKey:    cfg.RocketMQ.AccessKey,
+		AccessSecret: cfg.RocketMQ.AccessSecret,
 	}
 
 	consumerConfig := &rocketmq.Config{
 		Endpoint:      endpoint,
 		ConsumerGroup: cfg.RocketMQ.ConsumerGroup,
-		Credentials:   creds,
+		Credentials:   creds, // 确保不为 nil
 	}
 
 	// 创建消息监听器（使用 FuncMessageListener）
@@ -70,6 +74,10 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 				err = handleDayStatisticsMessages(ctx, message)
 			case "alipay-notify":
 				err = handleAlipayNotifyMessages(ctx, message)
+			case "cache-refresh":
+				err = handleCacheRefreshMessages(ctx, message)
+			case "balance-sync":
+				err = handleBalanceSyncMessages(ctx, message)
 			default:
 				logger.Logger.Warn("未知的主题",
 					zap.String("topic", topic),
@@ -91,22 +99,72 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 	}
 
 	// 创建消费者（需要在创建时指定 MessageListener 和订阅表达式）
-	consumer, err := rocketmq.NewPushConsumer(consumerConfig,
-		rocketmq.WithPushSubscriptionExpressions(map[string]*rocketmq.FilterExpression{
-			"callback-submit": rocketmq.SUB_ALL,
-			"order-notify":    rocketmq.SUB_ALL,
-			"day-statistics":  rocketmq.SUB_ALL,
-			"alipay-notify":   rocketmq.SUB_ALL,
-		}),
-		rocketmq.WithPushMessageListener(listener),
-	)
+	var consumer rocketmq.PushConsumer
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("创建 RocketMQ 消费者时发生 panic: %v", r)
+			}
+		}()
+		consumer, err = rocketmq.NewPushConsumer(consumerConfig,
+			rocketmq.WithPushSubscriptionExpressions(map[string]*rocketmq.FilterExpression{
+				"callback-submit": rocketmq.SUB_ALL,
+				"order-notify":    rocketmq.SUB_ALL,
+				"day-statistics":  rocketmq.SUB_ALL,
+				"alipay-notify":   rocketmq.SUB_ALL,
+				"cache-refresh":   rocketmq.SUB_ALL,
+				"balance-sync":    rocketmq.SUB_ALL,
+			}),
+			rocketmq.WithPushMessageListener(listener),
+		)
+	}()
+
 	if err != nil {
-		return nil, fmt.Errorf("创建 RocketMQ 消费者失败: %w", err)
+		if logger.Logger != nil {
+			logger.Logger.Warn("创建 RocketMQ 消费者失败，将使用同步处理",
+				zap.String("endpoint", endpoint),
+				zap.String("consumer_group", cfg.RocketMQ.ConsumerGroup),
+				zap.Error(err))
+		}
+		return &RocketMQConsumer{
+			enabled: false,
+		}, nil // 返回禁用状态的消费者，不返回错误
 	}
 
-	// 启动消费者
-	if err := consumer.Start(); err != nil {
-		return nil, fmt.Errorf("启动 RocketMQ 消费者失败: %w", err)
+	// 启动消费者（使用 defer recover 捕获可能的 panic）
+	startErr := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("启动 RocketMQ 消费者时发生 panic: %v", r)
+			}
+		}()
+		return consumer.Start()
+	}()
+
+	if startErr != nil {
+		// 分析错误类型，提供更友好的诊断信息
+		errMsg := startErr.Error()
+		var suggestion string
+		if strings.Contains(errMsg, "context deadline exceeded") || strings.Contains(errMsg, "create grpc conn failed") {
+			suggestion = "请检查：1) RocketMQ 服务是否正在运行；2) endpoint 和 port 配置是否正确；3) 网络连接是否正常；4) proxy 服务是否已启动（端口 8081）"
+		} else if strings.Contains(errMsg, "topic route") {
+			suggestion = "请检查：1) RocketMQ 服务是否正常运行；2) 配置的 topics 是否已在 RocketMQ 中创建"
+		}
+
+		if logger.Logger != nil {
+			logger.Logger.Warn("启动 RocketMQ 消费者失败，将使用同步处理",
+				zap.String("endpoint", endpoint),
+				zap.String("consumer_group", cfg.RocketMQ.ConsumerGroup),
+				zap.Strings("topics", cfg.RocketMQ.Topics),
+				zap.String("suggestion", suggestion),
+				zap.Error(startErr))
+		}
+		// 尝试关闭消费者
+		_ = consumer.GracefulStop()
+		return &RocketMQConsumer{
+			enabled: false,
+		}, nil // 返回禁用状态的消费者，不返回错误
 	}
 
 	logger.Logger.Info("RocketMQ 消费者启动成功",
@@ -421,6 +479,52 @@ func handleDayStatisticsMessages(ctx context.Context, msg *rocketmq.MessageView)
 	return nil
 }
 
+// handleCacheRefreshMessages 处理缓存刷新触发消息
+func handleCacheRefreshMessages(ctx context.Context, msg *rocketmq.MessageView) error {
+	var refreshMsg CacheRefreshMessage
+	if err := json.Unmarshal(msg.GetBody(), &refreshMsg); err != nil {
+		logger.Logger.Error("解析 cache_refresh 消息失败",
+			zap.String("message_id", msg.GetMessageId()),
+			zap.Error(err))
+		return err
+	}
+
+	// 直接调用缓存刷新逻辑，避免循环依赖
+	refreshCacheDirectly(ctx, refreshMsg.Full, refreshMsg.Targets, refreshMsg.TenantIDs, refreshMsg.WriteoffIDs)
+
+	logger.Logger.Info("已处理缓存刷新消息",
+		zap.String("message_id", msg.GetMessageId()),
+		zap.Bool("full", refreshMsg.Full),
+		zap.Strings("targets", refreshMsg.Targets),
+		zap.Any("tenant_ids", refreshMsg.TenantIDs),
+		zap.Any("writeoff_ids", refreshMsg.WriteoffIDs))
+
+	return nil
+}
+
+// handleBalanceSyncMessages 处理后台调额后的余额同步消息
+func handleBalanceSyncMessages(ctx context.Context, msg *rocketmq.MessageView) error {
+	var syncMsg BalanceSyncMessage
+	if err := json.Unmarshal(msg.GetBody(), &syncMsg); err != nil {
+		logger.Logger.Error("解析 balance_sync 消息失败",
+			zap.String("message_id", msg.GetMessageId()),
+			zap.Error(err))
+		return err
+	}
+
+	// 直接调用缓存刷新逻辑，避免循环依赖
+	targets := []string{"tenant_balances", "writeoff_balances"}
+	refreshCacheDirectly(ctx, syncMsg.Full, targets, syncMsg.TenantIDs, syncMsg.WriteoffIDs)
+
+	logger.Logger.Info("已处理余额同步消息",
+		zap.String("message_id", msg.GetMessageId()),
+		zap.Any("tenant_ids", syncMsg.TenantIDs),
+		zap.Any("writeoff_ids", syncMsg.WriteoffIDs),
+		zap.Bool("full", syncMsg.Full))
+
+	return nil
+}
+
 // Close 关闭消费者
 func (c *RocketMQConsumer) Close() error {
 	if !c.enabled {
@@ -440,4 +544,92 @@ func (c *RocketMQConsumer) Close() error {
 // IsEnabled 检查是否启用
 func (c *RocketMQConsumer) IsEnabled() bool {
 	return c.enabled
+}
+
+// refreshCacheDirectly 直接刷新缓存（避免循环依赖）
+// 这是一个简化版本，只处理必要的缓存刷新逻辑
+func refreshCacheDirectly(ctx context.Context, full bool, targets []string, tenantIDs []int64, writeoffIDs []int64) {
+	// 创建缓存刷新服务实例（避免导入 service 包）
+	// 这里直接调用数据库和 Redis 操作，简化实现
+	// 注意：这是一个临时解决方案，理想情况下应该将 CacheRefreshService 移到独立的包中
+
+	// 如果指定了租户ID或码商ID，直接刷新余额
+	if len(tenantIDs) > 0 {
+		refreshTenantBalancesByIDs(ctx, tenantIDs)
+	}
+	if len(writeoffIDs) > 0 {
+		refreshWriteoffBalancesByIDs(ctx, writeoffIDs)
+	}
+
+	// 处理其他目标（如果需要）
+	if len(targets) > 0 {
+		for _, target := range targets {
+			switch target {
+			case "tenant_balances":
+				if full {
+					refreshAllTenantBalances(ctx)
+				}
+			case "writeoff_balances":
+				if full {
+					refreshAllWriteoffBalances(ctx)
+				}
+				// 其他目标可以在这里添加
+			}
+		}
+	}
+}
+
+// refreshTenantBalancesByIDs 刷新指定租户的余额
+func refreshTenantBalancesByIDs(ctx context.Context, tenantIDs []int64) {
+	// 实现逻辑参考 service.CacheRefreshService.refreshTenantBalancesByIDs
+	// 这里简化实现，直接查询数据库并更新缓存
+	for _, tenantID := range tenantIDs {
+		var tenant models.Tenant
+		if err := database.DB.Where("id = ?", tenantID).First(&tenant).Error; err == nil {
+			// 更新 Redis 缓存
+			key := fmt.Sprintf("tenant:%d", tenantID)
+			data, _ := json.Marshal(tenant)
+			database.RDB.Set(ctx, key, data, 24*time.Hour)
+		}
+	}
+}
+
+// refreshWriteoffBalancesByIDs 刷新指定码商的余额
+func refreshWriteoffBalancesByIDs(ctx context.Context, writeoffIDs []int64) {
+	// 实现逻辑参考 service.CacheRefreshService.refreshWriteoffBalancesByIDs
+	for _, writeoffID := range writeoffIDs {
+		var writeoff models.Writeoff
+		if err := database.DB.Where("id = ?", writeoffID).First(&writeoff).Error; err == nil {
+			// 更新 Redis 缓存
+			key := fmt.Sprintf("writeoff:%d", writeoffID)
+			data, _ := json.Marshal(writeoff)
+			database.RDB.Set(ctx, key, data, 24*time.Hour)
+		}
+	}
+}
+
+// refreshAllTenantBalances 刷新所有租户余额
+func refreshAllTenantBalances(ctx context.Context) {
+	// 简化实现：刷新所有租户
+	var tenants []models.Tenant
+	if err := database.DB.Find(&tenants).Error; err == nil {
+		for _, tenant := range tenants {
+			key := fmt.Sprintf("tenant:%d", tenant.ID)
+			data, _ := json.Marshal(tenant)
+			database.RDB.Set(ctx, key, data, 24*time.Hour)
+		}
+	}
+}
+
+// refreshAllWriteoffBalances 刷新所有码商余额
+func refreshAllWriteoffBalances(ctx context.Context) {
+	// 简化实现：刷新所有码商
+	var writeoffs []models.Writeoff
+	if err := database.DB.Find(&writeoffs).Error; err == nil {
+		for _, writeoff := range writeoffs {
+			key := fmt.Sprintf("writeoff:%d", writeoff.ID)
+			data, _ := json.Marshal(writeoff)
+			database.RDB.Set(ctx, key, data, 24*time.Hour)
+		}
+	}
 }

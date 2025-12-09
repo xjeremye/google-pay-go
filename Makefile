@@ -82,3 +82,35 @@ swagger:
 # 生成 Swagger 文档并运行
 swagger-run: swagger run
 
+# ==================== 压测相关命令 ====================
+
+# 运行 k6 压测（创建订单）
+loadtest-order:
+	@echo "运行创建订单压测..."
+	@cd loadtest && ./run_k6.sh create_order
+
+# 运行 k6 压测（创建订单 POST）
+loadtest-order-post:
+	@echo "运行创建订单压测（POST）..."
+	@cd loadtest && ./run_k6.sh create_order_post
+
+# 运行 k6 压测（健康检查）
+loadtest-health:
+	@echo "运行健康检查压测..."
+	@cd loadtest && ./run_k6.sh health_check
+
+# 运行 k6 压测（混合场景）
+loadtest-mixed:
+	@echo "运行混合场景压测..."
+	@cd loadtest && ./run_k6.sh mixed_scenario
+
+# 运行 wrk 压测（健康检查）
+loadtest-wrk-health:
+	@echo "运行 wrk 健康检查压测..."
+	@cd loadtest && ./run_wrk.sh health_check
+
+# 分析压测结果
+loadtest-analyze:
+	@echo "分析压测结果..."
+	@cd loadtest && ./analyze_results.sh
+

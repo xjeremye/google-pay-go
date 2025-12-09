@@ -83,6 +83,7 @@ type RocketMQConfig struct {
 	ProducerGroup string   `mapstructure:"producer_group"` // 生产者组名
 	ConsumerGroup string   `mapstructure:"consumer_group"` // 消费者组名
 	Topics        []string `mapstructure:"topics"`         // 主题列表
+	LogLevel      string   `mapstructure:"log_level"`      // SDK 日志级别（DEBUG, INFO, WARN, ERROR），默认 WARN
 }
 
 // Load 加载配置文件

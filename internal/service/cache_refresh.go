@@ -29,6 +29,28 @@ type CacheRefreshService struct {
 	dbNoLog *gorm.DB
 }
 
+// Cache 刷新目标常量，供 MQ 消息指定
+const (
+	CacheTargetUsers            = "users"
+	CacheTargetMerchants        = "merchants"
+	CacheTargetTenants          = "tenants"
+	CacheTargetWriteoffs        = "writeoffs"
+	CacheTargetPayChannels      = "pay_channels"
+	CacheTargetPlugins          = "plugins"
+	CacheTargetPluginConfigs    = "plugin_configs"
+	CacheTargetPluginPayTypes   = "plugin_pay_types"
+	CacheTargetTenantBalances   = "tenant_balances"
+	CacheTargetWriteoffBalances = "writeoff_balances"
+)
+
+// CacheRefreshRequest 供 MQ 触发的刷新请求
+type CacheRefreshRequest struct {
+	Full        bool
+	Targets     []string
+	TenantIDs   []int64
+	WriteoffIDs []int64
+}
+
 // NewCacheRefreshService 创建缓存刷新服务
 func NewCacheRefreshService() *CacheRefreshService {
 	now := time.Now()
@@ -48,28 +70,78 @@ func NewCacheRefreshService() *CacheRefreshService {
 
 // Start 启动缓存刷新服务
 func (s *CacheRefreshService) Start(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second) // 每秒刷新一次
-	defer ticker.Stop()
-
-	// 立即执行一次全量刷新（初始化）
-	s.refreshAllIncremental(ctx, true)
-
-	for {
-		select {
-		case <-ticker.C:
-			// 增量刷新（只刷新最近更新的数据）
-			s.refreshAllIncremental(ctx, false)
-		case <-s.stopChan:
-			return
-		case <-ctx.Done():
-			return
-		}
+	// 旧的定时刷新机制已废弃，改为 MQ 触发。
+	// 为兼容已有启动流程，这里仅阻塞等待退出信号。
+	select {
+	case <-s.stopChan:
+	case <-ctx.Done():
 	}
 }
 
 // Stop 停止缓存刷新服务
 func (s *CacheRefreshService) Stop() {
 	close(s.stopChan)
+}
+
+// Refresh 由 MQ 触发的刷新入口
+func (s *CacheRefreshService) Refresh(ctx context.Context, req CacheRefreshRequest) {
+	since := s.lastRefreshTime
+	if req.Full {
+		since = time.Time{}
+	}
+
+	// 先处理明确指定的余额刷新，满足后台调额稳定同步的诉求
+	if len(req.TenantIDs) > 0 {
+		s.refreshTenantBalancesByIDs(ctx, req.TenantIDs)
+	}
+	if len(req.WriteoffIDs) > 0 {
+		s.refreshWriteoffBalancesByIDs(ctx, req.WriteoffIDs)
+	}
+
+	// 未指定目标时，默认刷新全部数据
+	if len(req.Targets) == 0 {
+		s.refreshAllIncremental(ctx, req.Full)
+		s.lastRefreshTime = time.Now().Add(-500 * time.Millisecond)
+		return
+	}
+
+	for _, target := range req.Targets {
+		switch target {
+		case CacheTargetUsers:
+			s.refreshUsersIncremental(ctx, since)
+		case CacheTargetMerchants:
+			s.refreshMerchantsIncremental(ctx, since)
+		case CacheTargetTenants:
+			s.refreshTenantsIncremental(ctx, since)
+		case CacheTargetWriteoffs:
+			s.refreshWriteoffsIncremental(ctx, since)
+		case CacheTargetPayChannels:
+			s.refreshPayChannelsIncremental(ctx, since)
+		case CacheTargetPlugins:
+			s.refreshPluginsIncremental(ctx, since)
+		case CacheTargetPluginConfigs:
+			s.refreshPluginConfigsIncremental(ctx, since)
+		case CacheTargetPluginPayTypes:
+			s.refreshPluginPayTypesIncremental(ctx, since)
+		case CacheTargetTenantBalances:
+			if len(req.TenantIDs) > 0 {
+				s.refreshTenantBalancesByIDs(ctx, req.TenantIDs)
+			} else {
+				s.refreshTenantBalancesIncremental(ctx, since)
+			}
+		case CacheTargetWriteoffBalances:
+			if len(req.WriteoffIDs) > 0 {
+				s.refreshWriteoffBalancesByIDs(ctx, req.WriteoffIDs)
+			} else {
+				s.refreshWriteoffBalancesIncremental(ctx, since)
+			}
+		default:
+			// 未知目标直接跳过
+			continue
+		}
+	}
+
+	s.lastRefreshTime = time.Now().Add(-500 * time.Millisecond)
 }
 
 // refreshAllIncremental 增量刷新所有热点数据缓存
@@ -890,6 +962,66 @@ func (s *CacheRefreshService) refreshWriteoffBalancesIncremental(ctx context.Con
 		// 从数据库同步余额到 Redis
 		if writeoff.Balance == nil {
 			// 如果数据库中是 NULL，在 Redis 中存储 "NULL" 作为标记
+			_ = s.redis.Set(ctx, balanceKey, "NULL", 0).Err()
+		} else {
+			_ = s.redis.Set(ctx, balanceKey, *writeoff.Balance, 0).Err()
+		}
+	}
+}
+
+// refreshTenantBalancesByIDs 按 ID 精确刷新租户余额与信任标志
+func (s *CacheRefreshService) refreshTenantBalancesByIDs(ctx context.Context, tenantIDs []int64) {
+	if len(tenantIDs) == 0 {
+		return
+	}
+
+	var tenants []struct {
+		ID      int64 `gorm:"column:id"`
+		Balance int64 `gorm:"column:balance"`
+		Trust   bool  `gorm:"column:trust"`
+	}
+
+	if err := s.dbNoLog.Table("dvadmin_tenant").
+		Select("id, balance, trust").
+		Where("id IN ?", tenantIDs).
+		Find(&tenants).Error; err != nil {
+		return
+	}
+
+	for _, tenant := range tenants {
+		balanceKey := fmt.Sprintf("tenant:balance:%d", tenant.ID)
+		_ = s.redis.Set(ctx, balanceKey, tenant.Balance, 0).Err()
+
+		trustKey := fmt.Sprintf("tenant:trust:%d", tenant.ID)
+		val := "0"
+		if tenant.Trust {
+			val = "1"
+		}
+		_ = s.redis.Set(ctx, trustKey, val, 0).Err()
+	}
+}
+
+// refreshWriteoffBalancesByIDs 按 ID 精确刷新码商余额
+func (s *CacheRefreshService) refreshWriteoffBalancesByIDs(ctx context.Context, writeoffIDs []int64) {
+	if len(writeoffIDs) == 0 {
+		return
+	}
+
+	var writeoffs []struct {
+		ID      int64  `gorm:"column:id"`
+		Balance *int64 `gorm:"column:balance"`
+	}
+
+	if err := s.dbNoLog.Table("dvadmin_writeoff").
+		Select("id, balance").
+		Where("id IN ?", writeoffIDs).
+		Find(&writeoffs).Error; err != nil {
+		return
+	}
+
+	for _, writeoff := range writeoffs {
+		balanceKey := fmt.Sprintf("writeoff:balance:%d", writeoff.ID)
+		if writeoff.Balance == nil {
 			_ = s.redis.Set(ctx, balanceKey, "NULL", 0).Err()
 		} else {
 			_ = s.redis.Set(ctx, balanceKey, *writeoff.Balance, 0).Err()

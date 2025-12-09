@@ -34,7 +34,7 @@ log:
   level: info               # 生产环境使用 info 级别
   format: json              # 生产环境使用 JSON 格式便于日志分析
   output: file              # 生产环境输出到文件
-  file_path: logs/app.log
+  file_path: ./logs/app.log
   max_size: 500             # 生产环境增加日志文件大小
   max_backups: 30           # 保留更多备份
   max_age: 90              # 保留更长时间
@@ -50,4 +50,21 @@ monitoring:
     - "172.16.0.0/12"            # 内网段
     - "192.168.0.0/16"           # 内网段
   swagger_enabled: false         # 生产环境关闭 Swagger
+
+# RocketMQ 配置（生产环境建议按需开启）
+rocketmq:
+  enabled: false                 # 根据部署实际开启
+  endpoint: localhost
+  port: 8081
+  access_key: ""
+  access_secret: ""
+  producer_group: "pay-producer"
+  consumer_group: "pay-consumer"
+  topics:
+    - "callback-submit"
+    - "order-notify"
+    - "day-statistics"
+    - "alipay-notify"
+    - "cache-refresh"
+    - "balance-sync"
 

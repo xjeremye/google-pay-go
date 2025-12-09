@@ -30,6 +30,7 @@ import (
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/mq"
 	_ "github.com/golang-pay-core/internal/plugin/alipay" // 导入以触发自动注册
+	_ "github.com/golang-pay-core/internal/plugin/mock"   // 导入模拟插件（用于压测）
 	"github.com/golang-pay-core/internal/router"
 	"github.com/golang-pay-core/internal/service"
 	"go.uber.org/zap"
@@ -85,11 +86,7 @@ func main() {
 	// 所有插件的注册逻辑都在各自的包中管理，保持 main.go 的简洁性
 	logger.Logger.Info("插件系统已初始化")
 
-	// 启动缓存刷新服务（每秒刷新一次热点数据）
-	cacheRefreshService := service.NewCacheRefreshService()
 	refreshCtx := context.Background()
-	go cacheRefreshService.Start(refreshCtx)
-	logger.Logger.Info("缓存刷新服务已启动（每秒刷新一次热点数据）")
 
 	// 启动通知重试服务（每30秒检查一次失败的通知并重试）
 	notifyRetryService := service.NewNotifyRetryService()

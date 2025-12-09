@@ -68,3 +68,18 @@ type AlipayNotifyData struct {
 	SellerID      string `json:"seller_id"`      // 卖家支付宝用户ID
 	GmtPayment    string `json:"gmt_payment"`    // 支付时间
 }
+
+// CacheRefreshMessage 缓存刷新触发消息（替代定时器）
+type CacheRefreshMessage struct {
+	Full        bool     `json:"full"`         // 是否全量刷新
+	Targets     []string `json:"targets"`      // 目标列表，见 cache_refresh CacheTarget* 常量
+	TenantIDs   []int64  `json:"tenant_ids"`   // 精确刷新租户余额
+	WriteoffIDs []int64  `json:"writeoff_ids"` // 精确刷新码商余额
+}
+
+// BalanceSyncMessage 后台调整余额后触发的稳定同步消息
+type BalanceSyncMessage struct {
+	TenantIDs   []int64 `json:"tenant_ids"`   // 需要刷新余额/信任标志的租户
+	WriteoffIDs []int64 `json:"writeoff_ids"` // 需要刷新余额的码商
+	Full        bool    `json:"full"`         // 是否强制全量刷新余额
+}

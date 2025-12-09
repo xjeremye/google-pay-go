@@ -34,7 +34,7 @@ log:
   level: debug             # 测试环境使用 debug 级别便于调试
   format: text             # 测试环境使用文本格式便于阅读
   output: stdout           # 测试环境输出到标准输出
-  file_path: logs/test.log
+  file_path: ./logs/test.log
   max_size: 100
   max_backups: 7
   max_age: 7               # 测试环境保留较短时间
@@ -47,4 +47,21 @@ monitoring:
     - "127.0.0.1"
     - "::1"
   swagger_enabled: true
+
+# RocketMQ 配置（测试环境）
+rocketmq:
+  enabled: false
+  endpoint: localhost
+  port: 8081
+  access_key: ""
+  access_secret: ""
+  producer_group: "pay-producer"
+  consumer_group: "pay-consumer"
+  topics:
+    - "callback-submit"
+    - "order-notify"
+    - "day-statistics"
+    - "alipay-notify"
+    - "cache-refresh"
+    - "balance-sync"
 

@@ -64,6 +64,12 @@ func (c *NotifyController) AlipayNotify(ctx *gin.Context) {
 		return
 	}
 
+	// Mock插件特殊处理：不需要验证签名和产品信息
+	if pluginType == "mock" || pluginType == "mock_alipay" {
+		c.handleMockNotify(ctx, pluginType, productID)
+		return
+	}
+
 	// 获取产品信息
 	product, err := alipay.GetAlipayProductByID(productID)
 	if err != nil {
@@ -201,6 +207,62 @@ func (c *NotifyController) AlipayNotify(ctx *gin.Context) {
 	}
 
 	// 立即返回 success（支付宝要求）
+	ctx.String(http.StatusOK, "success")
+}
+
+// handleMockNotify 处理Mock插件回调（用于压测）
+func (c *NotifyController) handleMockNotify(ctx *gin.Context, pluginType, productID string) {
+	// 解析回调参数（与支付宝回调格式相同）
+	var params map[string]string
+	if ctx.Request.Method == "POST" {
+		contentType := ctx.GetHeader("Content-Type")
+		if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+			if err := ctx.Request.ParseForm(); err != nil {
+				ctx.String(http.StatusBadRequest, "参数解析失败")
+				return
+			}
+			params = make(map[string]string)
+			for k, v := range ctx.Request.PostForm {
+				if len(v) > 0 {
+					params[k] = v[0]
+				}
+			}
+		} else {
+			params = make(map[string]string)
+			for k, v := range ctx.Request.URL.Query() {
+				if len(v) > 0 {
+					params[k] = v[0]
+				}
+			}
+		}
+	} else {
+		params = make(map[string]string)
+		for k, v := range ctx.Request.URL.Query() {
+			if len(v) > 0 {
+				params[k] = v[0]
+			}
+		}
+	}
+
+	if len(params) == 0 {
+		ctx.String(http.StatusBadRequest, "参数为空")
+		return
+	}
+
+	// Mock插件不需要验证签名，直接解析回调数据
+	notifyData, err := alipay.ParseNotifyParams(params)
+	if err != nil {
+		logger.Logger.Warn("解析Mock回调参数失败",
+			zap.String("product_id", productID),
+			zap.Error(err))
+		ctx.String(http.StatusBadRequest, "参数解析失败")
+		return
+	}
+
+	// 使用相同的处理逻辑（异步处理）
+	go c.handleAlipayNotify(context.Background(), notifyData, productID)
+
+	// 立即返回 success
 	ctx.String(http.StatusOK, "success")
 }
 
