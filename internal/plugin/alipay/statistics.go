@@ -10,6 +10,7 @@ import (
 	"github.com/golang-pay-core/internal/models"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // DayStatisticsService 日统计服务（放在 plugin 包中避免循环依赖）
@@ -71,42 +72,39 @@ func (s *DayStatisticsService) SubmitBaseDayStatistics(ctx context.Context, prod
 }
 
 // submitProductDayStatistics 更新产品日统计（普通模式）
+// 使用 INSERT ... ON DUPLICATE KEY UPDATE 避免并发竞态条件
 func (s *DayStatisticsService) submitProductDayStatistics(ctx context.Context, productID int64, date time.Time, channelID int64) error {
-	// 使用 ON DUPLICATE KEY UPDATE 或先查询后更新
-	var stats models.AlipayProductDay
-	err := database.DB.Where("date = ? AND product_id = ? AND pay_channel_id = ?", date, productID, channelID).
-		First(&stats).Error
-
-	if err == gorm.ErrRecordNotFound {
-		// 不存在，创建新记录
-		stats = models.AlipayProductDay{
-			ProductID:    &productID,
-			PayChannelID: &channelID,
-			Date:         date,
-			SubmitCount:  1,
-			Ver:          1,
-		}
-		if err := database.DB.Create(&stats).Error; err != nil {
-			return fmt.Errorf("创建产品日统计失败: %w", err)
-		}
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("查询产品日统计失败: %w", err)
+	stats := models.AlipayProductDay{
+		ProductID:    &productID,
+		PayChannelID: &channelID,
+		Date:         date,
+		SubmitCount:  1,
+		Ver:          1,
 	}
 
-	// 存在，更新计数（使用原子操作）
-	if err := database.DB.Model(&stats).
-		Updates(map[string]interface{}{
+	// 使用 ON DUPLICATE KEY UPDATE 实现原子 UPSERT
+	// 如果记录已存在（唯一索引冲突），则更新计数；否则创建新记录
+	err := database.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "date"},
+			{Name: "product_id"},
+			{Name: "pay_channel_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
 			"submit_count": gorm.Expr("submit_count + 1"),
 			"ver":          gorm.Expr("ver + 1"),
-		}).Error; err != nil {
-		return fmt.Errorf("更新产品日统计失败: %w", err)
+		}),
+	}).Create(&stats).Error
+
+	if err != nil {
+		return fmt.Errorf("创建/更新产品日统计失败: %w", err)
 	}
 
 	return nil
 }
 
 // submitPublicPoolDayStatistics 更新公池日统计（公池模式）
+// 使用 INSERT ... ON DUPLICATE KEY UPDATE 避免并发竞态条件
 func (s *DayStatisticsService) submitPublicPoolDayStatistics(ctx context.Context, productID int64, date time.Time, channelID int64) error {
 	// 查找公池记录
 	var pool models.AlipayPublicPool
@@ -119,71 +117,62 @@ func (s *DayStatisticsService) submitPublicPoolDayStatistics(ctx context.Context
 		return nil
 	}
 
-	// 使用 ON DUPLICATE KEY UPDATE 或先查询后更新
-	var stats models.AlipayPublicPoolDay
-	err := database.DB.Where("date = ? AND pool_id = ? AND pay_channel_id = ?", date, pool.ID, channelID).
-		First(&stats).Error
-
-	if err == gorm.ErrRecordNotFound {
-		// 不存在，创建新记录
-		stats = models.AlipayPublicPoolDay{
-			PoolID:       &pool.ID,
-			PayChannelID: &channelID,
-			Date:         date,
-			SubmitCount:  1,
-			Ver:          1,
-		}
-		if err := database.DB.Create(&stats).Error; err != nil {
-			return fmt.Errorf("创建公池日统计失败: %w", err)
-		}
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("查询公池日统计失败: %w", err)
+	stats := models.AlipayPublicPoolDay{
+		PoolID:       &pool.ID,
+		PayChannelID: &channelID,
+		Date:         date,
+		SubmitCount:  1,
+		Ver:          1,
 	}
 
-	// 存在，更新计数（使用原子操作）
-	if err := database.DB.Model(&stats).
-		Updates(map[string]interface{}{
+	// 使用 ON DUPLICATE KEY UPDATE 实现原子 UPSERT
+	// 如果记录已存在（唯一索引冲突），则更新计数；否则创建新记录
+	err := database.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "date"},
+			{Name: "pool_id"},
+			{Name: "pay_channel_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
 			"submit_count": gorm.Expr("submit_count + 1"),
 			"ver":          gorm.Expr("ver + 1"),
-		}).Error; err != nil {
-		return fmt.Errorf("更新公池日统计失败: %w", err)
+		}),
+	}).Create(&stats).Error
+
+	if err != nil {
+		return fmt.Errorf("创建/更新公池日统计失败: %w", err)
 	}
 
 	return nil
 }
 
 // submitShenmaDayStatistics 更新神码日统计（神码模式）
+// 使用 INSERT ... ON DUPLICATE KEY UPDATE 避免并发竞态条件
 func (s *DayStatisticsService) submitShenmaDayStatistics(ctx context.Context, shenmaID int64, date time.Time, channelID int64) error {
-	// 使用 ON DUPLICATE KEY UPDATE 或先查询后更新
-	var stats models.AlipayShenmaDay
-	err := database.DB.Where("date = ? AND shenma_id = ? AND pay_channel_id = ?", date, shenmaID, channelID).
-		First(&stats).Error
-
-	if err == gorm.ErrRecordNotFound {
-		// 不存在，创建新记录
-		stats = models.AlipayShenmaDay{
-			ShenmaID:     &shenmaID,
-			PayChannelID: &channelID,
-			Date:         date,
-			SubmitCount:  1,
-			Ver:          1,
-		}
-		if err := database.DB.Create(&stats).Error; err != nil {
-			return fmt.Errorf("创建神码日统计失败: %w", err)
-		}
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("查询神码日统计失败: %w", err)
+	stats := models.AlipayShenmaDay{
+		ShenmaID:     &shenmaID,
+		PayChannelID: &channelID,
+		Date:         date,
+		SubmitCount:  1,
+		Ver:          1,
 	}
 
-	// 存在，更新计数（使用原子操作）
-	if err := database.DB.Model(&stats).
-		Updates(map[string]interface{}{
+	// 使用 ON DUPLICATE KEY UPDATE 实现原子 UPSERT
+	// 如果记录已存在（唯一索引冲突），则更新计数；否则创建新记录
+	err := database.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "date"},
+			{Name: "shenma_id"},
+			{Name: "pay_channel_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
 			"submit_count": gorm.Expr("submit_count + 1"),
 			"ver":          gorm.Expr("ver + 1"),
-		}).Error; err != nil {
-		return fmt.Errorf("更新神码日统计失败: %w", err)
+		}),
+	}).Create(&stats).Error
+
+	if err != nil {
+		return fmt.Errorf("创建/更新神码日统计失败: %w", err)
 	}
 
 	return nil
