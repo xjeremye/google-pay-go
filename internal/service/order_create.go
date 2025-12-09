@@ -892,7 +892,7 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		ID:             orderCtx.OrderID,
 		OrderNo:        orderCtx.OrderNo,
 		OutOrderNo:     orderCtx.OutOrderNo,
-		OrderStatus:    models.OrderStatusPending,
+		OrderStatus:    models.OrderStatusGenerating,
 		Money:          orderCtx.Money,
 		Tax:            orderCtx.Tax,
 		ProductName:    productName,
@@ -1557,13 +1557,13 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, st
 					zap.Int64("amount", int64(order.Money)),
 					zap.Error(err))
 			}
-		case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
+		case models.OrderStatusFailed, models.OrderStatusCancelled:
 			// 订单失败/取消/过期：只从 Redis 释放预占，不扣减余额
 			if err := s.balanceService.ReleasePreTax(ctx, *tenantID, int64(order.Money)); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("释放预占余额失败: %w", err)
 			}
-			// OrderStatusPending 不需要处理（创建订单时已增加预占）
+			// OrderStatusGenerating 不需要处理（创建订单时已增加预占）
 		}
 	}
 
@@ -1618,7 +1618,7 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, st
 				tx.Rollback()
 				return fmt.Errorf("记录码商资金流水失败: %w", err)
 			}
-		case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
+		case models.OrderStatusFailed, models.OrderStatusCancelled:
 			// 订单失败/取消/过期：码商余额不需要处理（码商没有预占余额的概念）
 			// 码商余额只在支付成功时扣减
 		}
@@ -1661,7 +1661,7 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, st
 				// 回滚：重新预占（因为已经释放了）
 				// 注意：数据库余额扣减已回滚（事务回滚），只需要恢复 Redis 预占
 				_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
-			case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
+			case models.OrderStatusFailed, models.OrderStatusCancelled:
 				// 回滚：重新预占（因为已经释放了）
 				_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
 			}

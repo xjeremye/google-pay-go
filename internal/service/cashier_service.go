@@ -45,8 +45,8 @@ func (s *CashierService) RecordCashierVisit(ctx context.Context, orderNo string,
 		return fmt.Errorf("查询订单失败: %w", err)
 	}
 
-	// 检查订单状态（只有待支付状态的订单才记录访问）
-	if order.OrderStatus != models.OrderStatusPending {
+	// 检查订单状态（只有生成中、等待支付和支付中状态的订单才记录访问）
+	if order.OrderStatus != models.OrderStatusGenerating && order.OrderStatus != models.OrderStatusPaying {
 		// 订单已处理，不需要记录访问
 		return nil
 	}

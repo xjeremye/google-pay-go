@@ -105,7 +105,7 @@ func updateOrderStatusDirectly(ctx context.Context, orderID string, status int, 
 				zap.Int64("new_balance", newBalance),
 				zap.Int("money", order.Money))
 
-		case models.OrderStatusFailed, models.OrderStatusCancelled, models.OrderStatusExpired:
+		case models.OrderStatusFailed, models.OrderStatusCancelled:
 			// 订单失败/取消/过期：只从 Redis 释放预占，不扣减余额
 			if err := releasePreTaxDirectly(ctx, *tenantID, int64(order.Money)); err != nil {
 				tx.Rollback()

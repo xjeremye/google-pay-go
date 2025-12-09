@@ -9,10 +9,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/response"
 	"github.com/golang-pay-core/internal/service"
 	"github.com/golang-pay-core/internal/utils"
+	"go.uber.org/zap"
 )
 
 // PayController 支付控制器
@@ -241,8 +243,8 @@ func (c *PayController) Cashier(ctx *gin.Context) {
 	}
 	orderDetail := order.OrderDetail
 
-	// 检查订单状态
-	if order.OrderStatus != models.OrderStatusPending {
+	// 检查订单状态（允许生成中、等待支付和支付中状态的订单进入收银台）
+	if order.OrderStatus != models.OrderStatusGenerating && order.OrderStatus != models.OrderStatusPaying {
 		ctx.HTML(http.StatusBadRequest, "error.html", gin.H{
 			"title":   "订单状态错误",
 			"message": "订单已处理，无法支付",
@@ -262,6 +264,23 @@ func (c *PayController) Cashier(ctx *gin.Context) {
 				})
 				return
 			}
+		}
+	}
+
+	// 如果订单状态是生成中，更新为支付中（用户已进入收银台）
+	if order.OrderStatus == models.OrderStatusGenerating {
+		if err := c.orderService.UpdateOrderStatus(ctx, order.ID, models.OrderStatusPaying, ""); err != nil {
+			// 更新状态失败不影响页面显示，只记录日志
+			logger.Logger.Warn("更新订单状态为支付中失败",
+				zap.String("order_id", order.ID),
+				zap.String("order_no", orderNo),
+				zap.Error(err))
+		} else {
+			logger.Logger.Info("订单状态已更新为支付中",
+				zap.String("order_id", order.ID),
+				zap.String("order_no", orderNo))
+			// 更新本地订单对象的状态，避免后续逻辑使用旧状态
+			order.OrderStatus = models.OrderStatusPaying
 		}
 	}
 

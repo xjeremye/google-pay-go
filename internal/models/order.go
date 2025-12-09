@@ -65,13 +65,21 @@ func (OrderDetail) TableName() string {
 	return "dvadmin_order_detail"
 }
 
-// OrderStatus 订单状态常量
+// OrderStatus 订单状态常量（与 Python 代码保持一致）
 const (
-	OrderStatusPending   = 0 // 待支付
-	OrderStatusPaid      = 1 // 已支付
-	OrderStatusFailed    = 2 // 支付失败
-	OrderStatusCancelled = 3 // 已取消
-	OrderStatusExpired   = 4 // 已过期
+	OrderStatusGenerating   = 0 // 生成中
+	OrderStatusCodeFailed   = 1 // 出码失败
+	OrderStatusPaying       = 2 // 等待支付/支付中（用户已进入收银台）
+	OrderStatusFailed       = 3 // 支付失败
+	OrderStatusPaid         = 4 // 支付成功，通知已返回
+	OrderStatusRefunded     = 5 // 已退款
+	OrderStatusPaidNoNotify = 6 // 支付成功，通知未返回
+	OrderStatusClosed       = 7 // 已关闭
+
+	// 向后兼容的别名（保持现有代码可用）
+	OrderStatusPending   = OrderStatusPaying // 待支付（等同于等待支付）
+	OrderStatusCancelled = OrderStatusClosed // 已取消（等同于已关闭）
+	// OrderStatusExpired 已移除，使用 OrderStatusFailed 代替
 )
 
 // OrderDeviceDetail 订单设备详情模型
