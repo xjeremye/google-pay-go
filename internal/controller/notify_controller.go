@@ -381,11 +381,19 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 			// 计算实际收入
 			realMoney := updatedDetail.NotifyMoney - updatedDetail.MerchantTax
 
+			// 记录日志，帮助调试
+			logger.Logger.Info("构建订单成功数据",
+				zap.String("order_no", updatedOrder.OrderNo),
+				zap.String("order_id", updatedOrder.ID),
+				zap.Int("order_tax", updatedOrder.Tax),
+				zap.Int("merchant_tax", updatedDetail.MerchantTax),
+				zap.Int("notify_money", updatedDetail.NotifyMoney))
+
 			// 构建成功数据
 			successData := &service.OrderSuccessData{
 				OrderNo:        updatedOrder.OrderNo,
 				OutOrderNo:     updatedOrder.OutOrderNo,
-				Tax:            updatedOrder.Tax,
+				Tax:            updatedOrder.Tax, // 租户手续费（系统总利润）
 				MerchantTax:    updatedDetail.MerchantTax,
 				Money:          updatedOrder.Money,
 				NotifyMoney:    updatedDetail.NotifyMoney,
@@ -418,7 +426,17 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 				var merchant models.Merchant
 				if err := database.DB.Select("parent_id").Where("id = ?", *updatedOrder.MerchantID).First(&merchant).Error; err == nil {
 					successData.TenantID = merchant.ParentID
+					logger.Logger.Debug("查询租户ID成功",
+						zap.Int64("merchant_id", *updatedOrder.MerchantID),
+						zap.Int64("tenant_id", merchant.ParentID))
+				} else {
+					logger.Logger.Warn("查询租户ID失败",
+						zap.Int64("merchant_id", *updatedOrder.MerchantID),
+						zap.Error(err))
 				}
+			} else {
+				logger.Logger.Warn("订单没有商户ID，无法查询租户ID",
+					zap.String("order_no", updatedOrder.OrderNo))
 			}
 
 			// 如果有支付时间，使用支付时间

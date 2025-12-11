@@ -172,6 +172,13 @@ func (o *simpleOrderContextForSuccess) SetDomainURL(url string) {}
 // callbackPayChannelSuccess 通道统计回调
 // 参考 Python: callback_pay_channel_success
 func (s *OrderSuccessHookService) callbackPayChannelSuccess(ctx context.Context, data *OrderSuccessData) {
+	// 记录日志，帮助调试 tax 值
+	logger.Logger.Info("通道统计回调",
+		zap.String("order_no", data.OrderNo),
+		zap.Int64("channel_id", data.ChannelID),
+		zap.Int("tax", data.Tax),
+		zap.Int("notify_money", data.NotifyMoney))
+
 	statsService := NewStatisticsService()
 	stats := &models.PayChannelDayStatistics{
 		PayChannelID: &data.ChannelID,
@@ -187,6 +194,7 @@ func (s *OrderSuccessHookService) callbackPayChannelSuccess(ctx context.Context,
 	if err := statsService.SuccessBaseDayStatistics(ctx, stats, int64(data.NotifyMoney), int64(data.Tax), data.CreateDatetime, updateFields); err != nil {
 		logger.Logger.Error("通道统计失败",
 			zap.String("order_no", data.OrderNo),
+			zap.Int("tax", data.Tax),
 			zap.Error(err))
 	}
 }
@@ -223,6 +231,19 @@ func (s *OrderSuccessHookService) callbackMerchantSuccess(ctx context.Context, d
 // callbackTenantSuccess 租户统计回调
 // 参考 Python: callback_tenant_success
 func (s *OrderSuccessHookService) callbackTenantSuccess(ctx context.Context, data *OrderSuccessData) {
+	// 记录日志，帮助调试
+	logger.Logger.Info("更新租户日统计",
+		zap.String("order_no", data.OrderNo),
+		zap.Int64("tenant_id", data.TenantID),
+		zap.Int64("notify_money", int64(data.NotifyMoney)),
+		zap.Int("tax", data.Tax))
+
+	if data.TenantID == 0 {
+		logger.Logger.Warn("租户ID为0，跳过租户统计",
+			zap.String("order_no", data.OrderNo))
+		return
+	}
+
 	statsService := NewStatisticsService()
 	stats := &models.TenantDayStatistics{
 		TenantID: &data.TenantID,
@@ -231,7 +252,15 @@ func (s *OrderSuccessHookService) callbackTenantSuccess(ctx context.Context, dat
 	if err := statsService.SuccessBaseDayStatistics(ctx, stats, int64(data.NotifyMoney), int64(data.Tax), data.CreateDatetime, nil); err != nil {
 		logger.Logger.Error("租户统计失败",
 			zap.String("order_no", data.OrderNo),
+			zap.Int64("tenant_id", data.TenantID),
+			zap.Int("tax", data.Tax),
 			zap.Error(err))
+	} else {
+		logger.Logger.Info("租户统计更新成功",
+			zap.String("order_no", data.OrderNo),
+			zap.Int64("tenant_id", data.TenantID),
+			zap.Int("tax", data.Tax),
+			zap.Int64("notify_money", int64(data.NotifyMoney)))
 	}
 }
 
@@ -266,6 +295,14 @@ func (s *OrderSuccessHookService) callbackWriteoffSuccess(ctx context.Context, d
 		return
 	}
 
+	// 记录日志，帮助调试 tax 值
+	logger.Logger.Info("核销统计回调",
+		zap.String("order_no", data.OrderNo),
+		zap.Int64("writeoff_id", *data.WriteoffID),
+		zap.Int("money", data.Money),
+		zap.Int("tax", data.Tax),
+		zap.Int("notify_money", data.NotifyMoney))
+
 	statsService := NewStatisticsService()
 	stats := &models.WriteOffDayStatistics{
 		WriteoffID: data.WriteoffID,
@@ -274,6 +311,7 @@ func (s *OrderSuccessHookService) callbackWriteoffSuccess(ctx context.Context, d
 	if err := statsService.SuccessBaseDayStatistics(ctx, stats, int64(data.Money), int64(data.Tax), data.CreateDatetime, nil); err != nil {
 		logger.Logger.Error("核销统计失败",
 			zap.String("order_no", data.OrderNo),
+			zap.Int("tax", data.Tax),
 			zap.Error(err))
 		return
 	}
@@ -290,12 +328,48 @@ func (s *OrderSuccessHookService) callbackWriteoffSuccess(ctx context.Context, d
 // callbackDaySuccess 全局日统计回调
 // 参考 Python: callback_day_success
 func (s *OrderSuccessHookService) callbackDaySuccess(ctx context.Context, data *OrderSuccessData) {
+	// 查询订单设备详情以获取设备类型
+	var deviceDetail models.OrderDeviceDetail
+	deviceType := models.DeviceTypeUnknown // 默认未知设备
+	if err := database.DB.Where("order_id = ?", data.OrderID).First(&deviceDetail).Error; err == nil {
+		deviceType = deviceDetail.DeviceType
+	}
+
+	// 构建设备统计更新字段
+	deviceUpdateFields := map[string]interface{}{}
+	switch deviceType {
+	case models.DeviceTypeAndroid:
+		deviceUpdateFields["android_count"] = gorm.Expr("android_count + 1")
+	case models.DeviceTypeIOS:
+		deviceUpdateFields["ios_count"] = gorm.Expr("ios_count + 1")
+	case models.DeviceTypePC:
+		deviceUpdateFields["pc_count"] = gorm.Expr("pc_count + 1")
+	default:
+		deviceUpdateFields["unknown_count"] = gorm.Expr("unknown_count + 1")
+	}
+
+	// 记录日志，帮助调试
+	logger.Logger.Info("更新全局日统计",
+		zap.String("order_no", data.OrderNo),
+		zap.Int64("notify_money", int64(data.NotifyMoney)),
+		zap.Int("tax", data.Tax),
+		zap.Int("device_type", deviceType),
+		zap.Int("order_tax_from_data", data.Tax))
+
 	statsService := NewStatisticsService()
 	stats := &models.DayStatistics{}
 
-	if err := statsService.SuccessBaseDayStatistics(ctx, stats, int64(data.NotifyMoney), int64(data.Tax), data.CreateDatetime, nil); err != nil {
+	// 更新成功统计（包含设备统计和手续费）
+	// 注意：tax 是租户手续费，也就是系统总利润
+	if err := statsService.SuccessBaseDayStatistics(ctx, stats, int64(data.NotifyMoney), int64(data.Tax), data.CreateDatetime, deviceUpdateFields); err != nil {
 		logger.Logger.Error("全局日统计失败",
 			zap.String("order_no", data.OrderNo),
+			zap.Int("tax", data.Tax),
 			zap.Error(err))
+	} else {
+		logger.Logger.Info("全局日统计更新成功",
+			zap.String("order_no", data.OrderNo),
+			zap.Int("tax", data.Tax),
+			zap.Int64("notify_money", int64(data.NotifyMoney)))
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/plugin"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // BasePlugin 支付宝基础插件
@@ -144,13 +146,41 @@ func (p *BasePlugin) CallbackSubmit(ctx context.Context, req *plugin.CallbackSub
 		}
 	}
 
-	// 调用日统计服务
+	// 调用日统计服务（更新产品统计）
 	dayStatsService := NewDayStatisticsService()
 	if err := dayStatsService.SubmitBaseDayStatistics(ctx, req.ProductID, createDatetime, req.ChannelID, req.TenantID, extraArg); err != nil {
-		logger.Logger.Error("更新日统计失败",
+		logger.Logger.Error("更新产品日统计失败",
 			zap.String("order_no", req.OrderNo),
 			zap.String("product_id", req.ProductID),
 			zap.Int64("channel_id", req.ChannelID),
+			zap.Error(err))
+		// 不返回错误，避免影响主流程
+	}
+
+	// 3. 更新全局日统计（submit_count 和 submit_money）
+	// 参考 Python: 全局统计也需要更新提交统计
+	date := time.Date(createDatetime.Year(), createDatetime.Month(), createDatetime.Day(), 0, 0, 0, 0, createDatetime.Location())
+	globalStats := models.DayStatistics{
+		Date:        date,
+		SubmitCount: 1,
+		SubmitMoney: int64(req.Money),
+		Ver:         1,
+	}
+
+	err = database.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "date"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"submit_count": gorm.Expr("submit_count + 1"),
+			"submit_money": gorm.Expr("submit_money + ?", req.Money),
+			"ver":          gorm.Expr("ver + 1"),
+		}),
+	}).Create(&globalStats).Error
+
+	if err != nil {
+		logger.Logger.Error("更新全局日统计失败",
+			zap.String("order_no", req.OrderNo),
 			zap.Error(err))
 		// 不返回错误，避免影响主流程
 	}

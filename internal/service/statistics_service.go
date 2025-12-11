@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/golang-pay-core/internal/database"
+	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -214,6 +216,13 @@ func (s *StatisticsService) successTenantDayStatistics(
 		return fmt.Errorf("租户统计缺少 tenant_id")
 	}
 
+	// 记录日志，帮助调试
+	logger.Logger.Debug("更新租户日统计",
+		zap.Time("date", date),
+		zap.Int64("tenant_id", *stats.TenantID),
+		zap.Int64("success_money", successMoney),
+		zap.Int64("tax", tax))
+
 	err := database.DB.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "date"},
@@ -224,6 +233,17 @@ func (s *StatisticsService) successTenantDayStatistics(
 
 	if err != nil {
 		return fmt.Errorf("创建/更新租户日统计失败: %w", err)
+	}
+
+	// 记录更新后的值（查询确认）
+	var updatedStats models.TenantDayStatistics
+	if err := database.DB.Where("date = ? AND tenant_id = ?", date, *stats.TenantID).First(&updatedStats).Error; err == nil {
+		logger.Logger.Info("租户日统计更新成功",
+			zap.Time("date", date),
+			zap.Int64("tenant_id", *stats.TenantID),
+			zap.Int64("total_tax", updatedStats.TotalTax),
+			zap.Int64("success_money", updatedStats.SuccessMoney),
+			zap.Int("success_count", updatedStats.SuccessCount))
 	}
 
 	return nil
@@ -238,12 +258,23 @@ func (s *StatisticsService) successWriteoffDayStatistics(
 	date time.Time,
 	updateFields map[string]interface{},
 ) error {
+	// 记录日志，帮助调试 tax 值
+	logger.Logger.Info("更新核销日统计",
+		zap.Int64("writeoff_id", *stats.WriteoffID),
+		zap.Time("date", date),
+		zap.Int64("success_money", successMoney),
+		zap.Int64("tax", tax))
+
 	// 设置默认值
 	if stats.SuccessCount == 0 {
 		stats.SuccessCount = 1
 	}
 	if stats.SuccessMoney == 0 {
 		stats.SuccessMoney = successMoney
+	}
+	if stats.SubmitMoney == 0 {
+		// 如果是新记录，submit_money 应该等于 success_money（成功的订单金额就是提交的金额）
+		stats.SubmitMoney = successMoney
 	}
 	if stats.TotalTax == 0 {
 		stats.TotalTax = tax
@@ -322,6 +353,13 @@ func (s *StatisticsService) successDayStatistics(
 		doUpdatesMap[k] = v
 	}
 
+	// 记录日志，帮助调试
+	logger.Logger.Debug("更新全局日统计",
+		zap.Time("date", date),
+		zap.Int64("success_money", successMoney),
+		zap.Int64("tax", tax),
+		zap.Int("device_fields_count", len(updateFields)))
+
 	err := database.DB.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "date"},
@@ -331,6 +369,16 @@ func (s *StatisticsService) successDayStatistics(
 
 	if err != nil {
 		return fmt.Errorf("创建/更新全局日统计失败: %w", err)
+	}
+
+	// 记录更新后的值（查询确认）
+	var updatedStats models.DayStatistics
+	if err := database.DB.Where("date = ?", date).First(&updatedStats).Error; err == nil {
+		logger.Logger.Info("全局日统计更新成功",
+			zap.Time("date", date),
+			zap.Int64("total_tax", updatedStats.TotalTax),
+			zap.Int64("success_money", updatedStats.SuccessMoney),
+			zap.Int("success_count", updatedStats.SuccessCount))
 	}
 
 	return nil

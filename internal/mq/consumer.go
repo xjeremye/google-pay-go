@@ -3,10 +3,12 @@ package mq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	golang "github.com/apache/rocketmq-clients/golang/v5"
 	rocketmq "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
 	"github.com/golang-pay-core/config"
@@ -30,10 +32,6 @@ type RocketMQConsumer struct {
 // NewRocketMQConsumer 创建 RocketMQ 消费者
 func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 	cfg := config.GetConfig()
-
-	// 确保 RocketMQ SDK 的日志已重定向到我们的 logger
-	// redirectRocketMQLogs 在 rocketmq.go 中定义
-	redirectRocketMQLogs()
 
 	// 检查是否启用 RocketMQ
 	if !cfg.RocketMQ.Enabled {
@@ -149,7 +147,22 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 
 		done := make(chan error, 1)
 		go func() {
-			done <- consumer.Start()
+			err := consumer.Start()
+			// 过滤 "no new message" 错误（这是正常的轮询行为，不是真正的错误）
+			if err != nil {
+				var rpcStatus *golang.ErrRpcStatus
+				if ok := errors.As(err, &rpcStatus); ok {
+					// 如果是 40401 错误或 "no new message" 消息，忽略这个错误
+					if rpcStatus.GetCode() == 40401 || rpcStatus.GetMessage() == "no new message" {
+						// 这是正常的轮询行为，不是真正的错误，静默忽略
+						logger.Logger.Debug("RocketMQ 消费者轮询：无新消息（正常行为）",
+							zap.String("consumer_group", cfg.RocketMQ.ConsumerGroup))
+						done <- nil // 返回 nil，表示这不是错误
+						return
+					}
+				}
+			}
+			done <- err
 		}()
 
 		select {
@@ -161,28 +174,53 @@ func NewRocketMQConsumer() (*RocketMQConsumer, error) {
 	}()
 
 	if startErr != nil {
-		// 分析错误类型，提供更友好的诊断信息
-		errMsg := startErr.Error()
-		var suggestion string
-		if strings.Contains(errMsg, "context deadline exceeded") || strings.Contains(errMsg, "create grpc conn failed") {
-			suggestion = "请检查：1) RocketMQ 服务是否正在运行；2) endpoint 和 port 配置是否正确；3) 网络连接是否正常；4) proxy 服务是否已启动（端口 8081）"
-		} else if strings.Contains(errMsg, "topic route") {
-			suggestion = "请检查：1) RocketMQ 服务是否正常运行；2) 配置的 topics 是否已在 RocketMQ 中创建"
-		}
+		// 检查是否是 "no new message" 错误（这是正常的轮询行为，不是真正的错误）
+		var rpcStatus *golang.ErrRpcStatus
+		if ok := errors.As(startErr, &rpcStatus); ok {
+			// 如果是 40401 错误或 "no new message" 消息，忽略这个错误
+			if rpcStatus.GetCode() == 40401 || rpcStatus.GetMessage() == "no new message" {
+				// 这是正常的轮询行为，不是真正的错误，继续运行
+				logger.Logger.Debug("RocketMQ 消费者启动时轮询：无新消息（正常行为）",
+					zap.String("consumer_group", cfg.RocketMQ.ConsumerGroup))
+				// 不返回错误，继续运行
+			} else {
+				// 其他 RPC 错误，需要处理
+				logger.Logger.Warn("启动 RocketMQ 消费者时遇到 RPC 错误",
+					zap.String("endpoint", endpoint),
+					zap.String("consumer_group", cfg.RocketMQ.ConsumerGroup),
+					zap.Int32("rpc_code", rpcStatus.GetCode()),
+					zap.String("rpc_message", rpcStatus.GetMessage()),
+					zap.Error(startErr))
+				// 尝试关闭消费者
+				_ = consumer.GracefulStop()
+				return &RocketMQConsumer{
+					enabled: false,
+				}, nil
+			}
+		} else {
+			// 分析其他错误类型，提供更友好的诊断信息
+			errMsg := startErr.Error()
+			var suggestion string
+			if strings.Contains(errMsg, "context deadline exceeded") || strings.Contains(errMsg, "create grpc conn failed") {
+				suggestion = "请检查：1) RocketMQ 服务是否正在运行；2) endpoint 和 port 配置是否正确；3) 网络连接是否正常；4) proxy 服务是否已启动（端口 8081）"
+			} else if strings.Contains(errMsg, "topic route") {
+				suggestion = "请检查：1) RocketMQ 服务是否正常运行；2) 配置的 topics 是否已在 RocketMQ 中创建"
+			}
 
-		if logger.Logger != nil {
-			logger.Logger.Warn("启动 RocketMQ 消费者失败，将使用同步处理",
-				zap.String("endpoint", endpoint),
-				zap.String("consumer_group", cfg.RocketMQ.ConsumerGroup),
-				zap.Strings("topics", cfg.RocketMQ.Topics),
-				zap.String("suggestion", suggestion),
-				zap.Error(startErr))
+			if logger.Logger != nil {
+				logger.Logger.Warn("启动 RocketMQ 消费者失败，将使用同步处理",
+					zap.String("endpoint", endpoint),
+					zap.String("consumer_group", cfg.RocketMQ.ConsumerGroup),
+					zap.Strings("topics", cfg.RocketMQ.Topics),
+					zap.String("suggestion", suggestion),
+					zap.Error(startErr))
+			}
+			// 尝试关闭消费者
+			_ = consumer.GracefulStop()
+			return &RocketMQConsumer{
+				enabled: false,
+			}, nil // 返回禁用状态的消费者，不返回错误
 		}
-		// 尝试关闭消费者
-		_ = consumer.GracefulStop()
-		return &RocketMQConsumer{
-			enabled: false,
-		}, nil // 返回禁用状态的消费者，不返回错误
 	}
 
 	logger.Logger.Info("RocketMQ 消费者启动成功",

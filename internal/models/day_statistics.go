@@ -99,6 +99,7 @@ type WriteOffDayStatistics struct {
 	SuccessCount int       `gorm:"not null;default:0;comment:成功订单数" json:"success_count"`
 	SubmitCount  int       `gorm:"not null;default:0;comment:总提交订单数" json:"submit_count"`
 	SuccessMoney int64     `gorm:"not null;default:0;comment:总收入" json:"success_money"`
+	SubmitMoney  int64     `gorm:"not null;comment:总提交收入" json:"submit_money"`
 	TotalTax     int64     `gorm:"not null;default:0;comment:总利润" json:"total_tax"`
 	Date         time.Time `gorm:"type:date;not null;comment:日期" json:"date"`
 	Ver          int64     `gorm:"not null;comment:版本号" json:"ver"`
@@ -113,5 +114,3 @@ type WriteOffDayStatistics struct {
 func (WriteOffDayStatistics) TableName() string {
 	return "dvadmin_day_statistics_writeoff"
 }
-
-

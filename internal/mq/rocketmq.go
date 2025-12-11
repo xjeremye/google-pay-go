@@ -16,48 +16,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// setupRocketMQLogger 配置 RocketMQ SDK 使用控制台输出日志
-// 注意：此函数已不再使用，配置逻辑已移到 init() 和 redirectRocketMQLogs()
-// 保留此函数仅用于向后兼容（如果其他地方有调用）
-func setupRocketMQLogger() {
-	os.Setenv("mq.consoleAppender.enabled", "false")
-	// if os.Getenv("rocketmq.client.logLevel") == "" {
-	// 	os.Setenv("rocketmq.client.logLevel", "WARN")
-	// }
-	rocketmq.ResetLogger()
-}
-
-// redirectRocketMQLogs 确保 RocketMQ SDK 的日志配置已应用
-// 由于 RocketMQ SDK 已配置为输出到控制台，而我们的 logger 也输出到控制台（当配置为 stdout 时）
-// 日志会自然合并，不需要额外的重定向
-func redirectRocketMQLogs() {
-	cfg := config.GetConfig()
-
-	// 确保配置已应用（如果之前没有设置）
-	if os.Getenv("mq.consoleAppender.enabled") != "true" {
-		setupRocketMQLogger()
-	}
-
-	// 根据配置更新日志级别（如果配置了）
-	if cfg != nil && cfg.RocketMQ.LogLevel != "" {
-		currentLevel := os.Getenv("rocketmq.client.logLevel")
-		if currentLevel != cfg.RocketMQ.LogLevel {
-			os.Setenv("rocketmq.client.logLevel", cfg.RocketMQ.LogLevel)
-			rocketmq.ResetLogger()
-		}
-	}
-
-	if logger.Logger != nil {
-		logLevel := os.Getenv("rocketmq.client.logLevel")
-		if logLevel == "" {
-			logLevel = "WARN"
-		}
-		logger.Logger.Debug("RocketMQ SDK 日志配置已应用",
-			zap.String("source", "rocketmq"),
-			zap.String("log_level", logLevel))
-	}
-}
-
 func init() {
 	// init 函数中不能访问 config，因为 config 可能还未加载
 	// 所以先设置默认值，在 redirectRocketMQLogs 中会根据配置更新
@@ -100,10 +58,6 @@ func GetGlobalMQClient() *RocketMQClient {
 // NewRocketMQClient 创建 RocketMQ 客户端
 func NewRocketMQClient() (*RocketMQClient, error) {
 	cfg := config.GetConfig()
-
-	// 确保 RocketMQ SDK 的日志已重定向到我们的 logger
-	redirectRocketMQLogs()
-
 	// 检查是否启用 RocketMQ
 	if !cfg.RocketMQ.Enabled {
 		if logger.Logger != nil {

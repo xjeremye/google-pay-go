@@ -640,6 +640,11 @@ func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreat
 		return err
 	}
 
+	// 先设置 ChannelID，因为后续计算手续费需要用到
+	orderCtx.Channel = channel
+	orderCtx.ChannelID = channelID
+	orderCtx.PluginID = channel.PluginID
+
 	// 计算商户手续费（浮动前金额）
 	// 参考 Python: _order_check_merchant_channel
 	if err := s.calculateMerchantTax(ctx, orderCtx); err != nil {
@@ -654,10 +659,6 @@ func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreat
 	if err := s.calculateTenantTax(ctx, orderCtx); err != nil {
 		return err
 	}
-
-	orderCtx.Channel = channel
-	orderCtx.ChannelID = channelID
-	orderCtx.PluginID = channel.PluginID
 
 	return nil
 }
@@ -941,32 +942,92 @@ func (s *OrderService) calculateMerchantTax(ctx context.Context, orderCtx *Order
 // 参考 Python: _order_check_tenant_channel
 // 公式: 租户手续费 = max(int(通道费率 * 订单金额(浮动后) / 100 + 0.5), 1)
 func (s *OrderService) calculateTenantTax(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	// 记录开始计算
+	logger.Logger.Info("开始计算租户手续费",
+		zap.Int64("tenant_id", orderCtx.TenantID),
+		zap.Int64("channel_id", orderCtx.ChannelID),
+		zap.Int("money", orderCtx.Money))
+
 	if orderCtx.TenantID == 0 || orderCtx.ChannelID == 0 {
+		logger.Logger.Warn("租户ID或通道ID为0，无法计算手续费",
+			zap.Int64("tenant_id", orderCtx.TenantID),
+			zap.Int64("channel_id", orderCtx.ChannelID))
 		orderCtx.Tax = 0
 		return nil
 	}
 
 	// 查询租户通道费率
+	// 注意：Python 代码中没有过滤 status，所以这里也不过滤
 	var channelTax models.PayChannelTax
-	if err := database.DB.Where("pay_channel_id = ? AND tenant_id = ?", orderCtx.ChannelID, orderCtx.TenantID).First(&channelTax).Error; err != nil {
+	query := database.DB.Where("pay_channel_id = ? AND tenant_id = ?", orderCtx.ChannelID, orderCtx.TenantID)
+
+	// 记录查询SQL，帮助调试
+	logger.Logger.Debug("查询租户通道费率",
+		zap.Int64("pay_channel_id", orderCtx.ChannelID),
+		zap.Int64("tenant_id", orderCtx.TenantID))
+
+	if err := query.First(&channelTax).Error; err != nil {
 		// 如果查询失败，手续费为0（容错处理）
+		// 参考 Python: 如果 channel_tax 不存在，不会设置 ctx.tax（保持原值0）
+		logger.Logger.Warn("查询租户通道费率失败，手续费为0",
+			zap.Int64("channel_id", orderCtx.ChannelID),
+			zap.Int64("tenant_id", orderCtx.TenantID),
+			zap.Error(err))
+
+		// 尝试查询所有匹配的记录，帮助调试
+		var allTaxes []models.PayChannelTax
+		if err2 := database.DB.Where("pay_channel_id = ?", orderCtx.ChannelID).Find(&allTaxes).Error; err2 == nil {
+			logger.Logger.Info("该通道的所有费率记录",
+				zap.Int64("channel_id", orderCtx.ChannelID),
+				zap.Int("count", len(allTaxes)))
+			for _, t := range allTaxes {
+				logger.Logger.Info("费率记录",
+					zap.Int64("id", t.ID),
+					zap.Int64("tenant_id", t.TenantID),
+					zap.Float64("tax", t.Tax))
+			}
+		}
+
 		orderCtx.Tax = 0
 		return nil
 	}
 
-	// 如果费率为0，手续费为0
+	// 记录查询到的费率
+	logger.Logger.Info("查询到租户通道费率",
+		zap.Int64("channel_id", orderCtx.ChannelID),
+		zap.Int64("tenant_id", orderCtx.TenantID),
+		zap.Float64("tax_rate", channelTax.Tax),
+		zap.Int64("channel_tax_id", channelTax.ID))
+
+	// 参考 Python: if channel_tax.tax != 0:
+	// 如果费率为0，手续费为0（不设置，保持原值0）
 	if channelTax.Tax == 0 {
+		logger.Logger.Debug("租户通道费率为0，手续费为0",
+			zap.Int64("channel_id", orderCtx.ChannelID),
+			zap.Int64("tenant_id", orderCtx.TenantID))
 		orderCtx.Tax = 0
 		return nil
 	}
 
 	// 手续费计算公式: 浮动后金额 * 费率 / 100，四舍五入，最低扣除1分
+	// 参考 Python: ctx.tax = max(int(channel_tax.tax * ctx.money / 100 + Decimal(0.5)), 1)
 	// 公式: max(int(通道费率 * 订单金额(浮动后) / 100 + 0.5), 1)
-	tax := int(channelTax.Tax*float64(orderCtx.Money)/100.0 + 0.5)
+	// 注意：这里使用 float64 进行计算，然后转换为 int
+	calculatedTax := channelTax.Tax * float64(orderCtx.Money) / 100.0
+	tax := int(calculatedTax + 0.5) // 四舍五入
 	if tax < 1 {
 		tax = 1
 	}
 	orderCtx.Tax = tax
+
+	logger.Logger.Info("计算租户手续费成功",
+		zap.Int64("channel_id", orderCtx.ChannelID),
+		zap.Int64("tenant_id", orderCtx.TenantID),
+		zap.Float64("tax_rate", channelTax.Tax),
+		zap.Int("money", orderCtx.Money),
+		zap.Float64("calculated_tax_float", calculatedTax),
+		zap.Int("calculated_tax", tax),
+		zap.Int("final_tax", orderCtx.Tax))
 
 	return nil
 }
@@ -1042,6 +1103,13 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		productName = fmt.Sprintf("[%d]%s", orderCtx.Channel.ID, orderCtx.Channel.Name)
 	}
 
+	// 记录订单创建时的Tax值，帮助调试
+	logger.Logger.Debug("创建订单，保存Tax值",
+		zap.String("order_no", orderCtx.OrderNo),
+		zap.Int("tax", orderCtx.Tax),
+		zap.Int64("channel_id", orderCtx.ChannelID),
+		zap.Int64("tenant_id", orderCtx.TenantID))
+
 	// 创建订单
 	order := &models.Order{
 		ID:             orderCtx.OrderID,
@@ -1049,7 +1117,7 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 		OutOrderNo:     orderCtx.OutOrderNo,
 		OrderStatus:    models.OrderStatusGenerating,
 		Money:          orderCtx.Money,
-		Tax:            orderCtx.Tax,
+		Tax:            orderCtx.Tax, // 租户手续费（系统总利润）
 		ProductName:    productName,
 		ReqExtra:       orderCtx.Extra,
 		CreateDatetime: &now,
