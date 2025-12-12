@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-pay-core/internal/database"
@@ -51,9 +50,9 @@ func (s *CacheService) GetMerchantWithUser(ctx context.Context, merchantID int64
 		return nil, nil, err
 	}
 
-	// 缓存商户信息
+	// 缓存商户信息（永不过期，通过 MQ 消息主动更新）
 	if data, err := json.Marshal(merchant); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 24*time.Hour)
+		s.redis.Set(ctx, cacheKey, data, 0)
 	}
 
 	// 获取用户信息
@@ -87,9 +86,9 @@ func (s *CacheService) GetUser(ctx context.Context, userID int64) (*SystemUser, 
 		return nil, err
 	}
 
-	// 缓存用户信息
+	// 缓存用户信息（永不过期，通过 MQ 消息主动更新）
 	if data, err := json.Marshal(user); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 1*time.Hour)
+		s.redis.Set(ctx, cacheKey, data, 0)
 	}
 
 	return &user, nil
@@ -128,9 +127,9 @@ func (s *CacheService) GetTenantWithUser(ctx context.Context, tenantID int64) (*
 		return nil, nil, err
 	}
 
-	// 缓存租户信息
+	// 缓存租户信息（永不过期，通过 MQ 消息主动更新）
 	if data, err := json.Marshal(tenant); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 24*time.Hour)
+		s.redis.Set(ctx, cacheKey, data, 0)
 	}
 
 	// 获取用户信息
@@ -169,9 +168,9 @@ func (s *CacheService) GetPayChannel(ctx context.Context, channelID int64) (*mod
 		return nil, err
 	}
 
-	// 缓存渠道信息
+	// 缓存渠道信息（永不过期，通过 MQ 消息主动更新）
 	if data, err := json.Marshal(channel); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 1*time.Hour)
+		s.redis.Set(ctx, cacheKey, data, 0)
 	}
 
 	return &channel, nil
@@ -216,9 +215,9 @@ func (s *CacheService) GetAvailableDomains(ctx context.Context, upstream int) ([
 		return nil, err
 	}
 
-	// 缓存域名列表（5分钟过期，因为域名状态可能变化）
+	// 缓存域名列表（永不过期，通过 MQ 消息主动更新）
 	if data, err := json.Marshal(domains); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 5*time.Minute)
+		s.redis.Set(ctx, cacheKey, data, 0)
 	}
 
 	return domains, nil
@@ -251,9 +250,9 @@ func (s *CacheService) GetWriteoffWithUser(ctx context.Context, writeoffID int64
 		return nil, nil, err
 	}
 
-	// 缓存码商信息
+	// 缓存码商信息（永不过期，通过 MQ 消息主动更新）
 	if data, err := json.Marshal(writeoff); err == nil {
-		s.redis.Set(ctx, cacheKey, data, 24*time.Hour)
+		s.redis.Set(ctx, cacheKey, data, 0)
 	}
 
 	// 获取用户信息
@@ -296,6 +295,95 @@ func (s *CacheService) GetPluginConfigByKey(ctx context.Context, pluginID int64,
 	}
 
 	return &config, nil
+}
+
+// GetMerchantPayChannel 获取商户支付通道关联（带缓存）
+func (s *CacheService) GetMerchantPayChannel(ctx context.Context, merchantID, channelID int64) (*models.MerchantPayChannel, error) {
+	cacheKey := fmt.Sprintf("merchant_channel:%d:%d", merchantID, channelID)
+
+	// 尝试从缓存获取
+	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
+		var merchantChannel models.MerchantPayChannel
+		if err := json.Unmarshal([]byte(val), &merchantChannel); err == nil {
+			return &merchantChannel, nil
+		}
+	}
+
+	// 从数据库获取
+	var merchantChannel models.MerchantPayChannel
+	if err := database.DB.Where("merchant_id = ? AND pay_channel_id = ?", merchantID, channelID).
+		First(&merchantChannel).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("商户支付通道关联不存在")
+		}
+		return nil, err
+	}
+
+	// 缓存商户支付通道关联（永不过期，通过 MQ 消息主动更新）
+	if data, err := json.Marshal(merchantChannel); err == nil {
+		s.redis.Set(ctx, cacheKey, data, 0)
+	}
+
+	return &merchantChannel, nil
+}
+
+// GetPayChannelTax 获取租户通道费率（带缓存）
+func (s *CacheService) GetPayChannelTax(ctx context.Context, channelID, tenantID int64) (*models.PayChannelTax, error) {
+	cacheKey := fmt.Sprintf("channel_tax:%d:%d", channelID, tenantID)
+
+	// 尝试从缓存获取
+	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
+		var channelTax models.PayChannelTax
+		if err := json.Unmarshal([]byte(val), &channelTax); err == nil {
+			return &channelTax, nil
+		}
+	}
+
+	// 从数据库获取
+	var channelTax models.PayChannelTax
+	if err := database.DB.Where("pay_channel_id = ? AND tenant_id = ?", channelID, tenantID).
+		First(&channelTax).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("租户通道费率不存在")
+		}
+		return nil, err
+	}
+
+	// 缓存租户通道费率（永不过期，通过 MQ 消息主动更新）
+	if data, err := json.Marshal(channelTax); err == nil {
+		s.redis.Set(ctx, cacheKey, data, 0)
+	}
+
+	return &channelTax, nil
+}
+
+// GetPayDomainByURL 根据 URL 获取域名（带缓存）
+func (s *CacheService) GetPayDomainByURL(ctx context.Context, url string) (*models.PayDomain, error) {
+	cacheKey := fmt.Sprintf("domain_url:%s", url)
+
+	// 尝试从缓存获取
+	if val, err := s.redis.Get(ctx, cacheKey).Result(); err == nil {
+		var domain models.PayDomain
+		if err := json.Unmarshal([]byte(val), &domain); err == nil {
+			return &domain, nil
+		}
+	}
+
+	// 从数据库获取
+	var domain models.PayDomain
+	if err := database.DB.Where("url = ?", url).First(&domain).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("域名不存在")
+		}
+		return nil, err
+	}
+
+	// 缓存域名信息（永不过期，通过 MQ 消息主动更新）
+	if data, err := json.Marshal(domain); err == nil {
+		s.redis.Set(ctx, cacheKey, data, 0)
+	}
+
+	return &domain, nil
 }
 
 // SystemUser 系统用户模型（用于查询）

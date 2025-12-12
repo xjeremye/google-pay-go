@@ -22,6 +22,7 @@ import (
 type NotifyController struct {
 	orderService  *service.OrderService
 	notifyService *service.OrderNotifyService
+	cacheService  *service.CacheService
 	mqClient      *mq.RocketMQClient // RocketMQ 客户端（可选）
 }
 
@@ -36,6 +37,7 @@ func NewNotifyController() *NotifyController {
 	return &NotifyController{
 		orderService:  service.NewOrderService(),
 		notifyService: service.NewOrderNotifyService(),
+		cacheService:  service.NewCacheService(),
 		mqClient:      mqClient,
 	}
 }
@@ -421,10 +423,10 @@ func (c *NotifyController) handleAlipayNotify(ctx context.Context, notifyData *a
 				successData.PluginID = *updatedDetail.PluginID
 			}
 
-			// 查询租户ID（从商户的parent_id获取）
+			// 查询租户ID（从商户的parent_id获取，使用缓存服务）
 			if updatedOrder.MerchantID != nil {
-				var merchant models.Merchant
-				if err := database.DB.Select("parent_id").Where("id = ?", *updatedOrder.MerchantID).First(&merchant).Error; err == nil {
+				merchant, _, err := c.cacheService.GetMerchantWithUser(context.Background(), *updatedOrder.MerchantID)
+				if err == nil && merchant != nil && merchant.ParentID > 0 {
 					successData.TenantID = merchant.ParentID
 					logger.Logger.Debug("查询租户ID成功",
 						zap.Int64("merchant_id", *updatedOrder.MerchantID),

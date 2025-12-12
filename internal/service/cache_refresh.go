@@ -31,16 +31,19 @@ type CacheRefreshService struct {
 
 // Cache 刷新目标常量，供 MQ 消息指定
 const (
-	CacheTargetUsers            = "users"
-	CacheTargetMerchants        = "merchants"
-	CacheTargetTenants          = "tenants"
-	CacheTargetWriteoffs        = "writeoffs"
-	CacheTargetPayChannels      = "pay_channels"
-	CacheTargetPlugins          = "plugins"
-	CacheTargetPluginConfigs    = "plugin_configs"
-	CacheTargetPluginPayTypes   = "plugin_pay_types"
-	CacheTargetTenantBalances   = "tenant_balances"
-	CacheTargetWriteoffBalances = "writeoff_balances"
+	CacheTargetUsers               = "users"
+	CacheTargetMerchants           = "merchants"
+	CacheTargetTenants             = "tenants"
+	CacheTargetWriteoffs           = "writeoffs"
+	CacheTargetPayChannels         = "pay_channels"
+	CacheTargetPlugins             = "plugins"
+	CacheTargetPluginConfigs       = "plugin_configs"
+	CacheTargetPluginPayTypes      = "plugin_pay_types"
+	CacheTargetTenantBalances      = "tenant_balances"
+	CacheTargetWriteoffBalances    = "writeoff_balances"
+	CacheTargetMerchantPayChannels = "merchant_pay_channels"
+	CacheTargetPayChannelTaxes     = "pay_channel_taxes"
+	CacheTargetPayDomains          = "pay_domains"
 )
 
 // CacheRefreshRequest 供 MQ 触发的刷新请求
@@ -135,6 +138,12 @@ func (s *CacheRefreshService) Refresh(ctx context.Context, req CacheRefreshReque
 			} else {
 				s.refreshWriteoffBalancesIncremental(ctx, since)
 			}
+		case CacheTargetMerchantPayChannels:
+			s.refreshMerchantPayChannelsIncremental(ctx, since)
+		case CacheTargetPayChannelTaxes:
+			s.refreshPayChannelTaxesIncremental(ctx, since)
+		case CacheTargetPayDomains:
+			s.refreshPayDomainsIncremental(ctx, since)
 		default:
 			// 未知目标直接跳过
 			continue
@@ -184,6 +193,15 @@ func (s *CacheRefreshService) refreshAllIncremental(ctx context.Context, fullRef
 	// 刷新码商余额缓存（关键数据，必须每秒更新以确保一致性）
 	s.refreshWriteoffBalancesIncremental(ctx, refreshSince)
 
+	// 刷新商户支付通道关联缓存
+	s.refreshMerchantPayChannelsIncremental(ctx, refreshSince)
+
+	// 刷新租户通道费率缓存
+	s.refreshPayChannelTaxesIncremental(ctx, refreshSince)
+
+	// 刷新域名缓存
+	s.refreshPayDomainsIncremental(ctx, refreshSince)
+
 	// 更新最后刷新时间
 	s.lastRefreshTime = now.Add(-500 * time.Millisecond) // 留500ms缓冲，避免遗漏
 }
@@ -225,7 +243,7 @@ func (s *CacheRefreshService) refreshUsersIncremental(ctx context.Context, since
 			}
 
 			if data, err := json.Marshal(userData); err == nil {
-				_ = s.redis.Set(ctx, cacheKey, data, 1*time.Hour).Err()
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 			}
 
 			// 记录最大的更新时间
@@ -329,7 +347,7 @@ func (s *CacheRefreshService) refreshMerchantsIncremental(ctx context.Context, s
 
 			// 更新缓存
 			if data, err := json.Marshal(merchant); err == nil {
-				_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 			}
 
 			// 记录最大的更新时间
@@ -441,7 +459,7 @@ func (s *CacheRefreshService) refreshTenantsIncremental(ctx context.Context, sin
 		cacheKey := fmt.Sprintf("tenant:%d", tenant.ID)
 
 		if data, err := json.Marshal(tenant); err == nil {
-			_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+			_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 		}
 	}
 
@@ -468,7 +486,7 @@ func (s *CacheRefreshService) refreshPayChannelsIncremental(ctx context.Context,
 			cacheKey := fmt.Sprintf("channel:%d", channel.ID)
 
 			if data, err := json.Marshal(channel); err == nil {
-				_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 			}
 
 			// 记录最大的更新时间
@@ -550,7 +568,7 @@ func (s *CacheRefreshService) refreshPluginsIncremental(ctx context.Context, sin
 			cacheKey := fmt.Sprintf("plugin:%d", plugin.ID)
 
 			if data, err := json.Marshal(plugin); err == nil {
-				_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 			}
 
 			// 记录最大的更新时间
@@ -636,7 +654,7 @@ func (s *CacheRefreshService) refreshPluginConfigsIncremental(ctx context.Contex
 			if len(configs) > 0 {
 				cacheKey := fmt.Sprintf("plugin_config:%d", plugin.ID)
 				if data, err := json.Marshal(configs); err == nil {
-					_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+					_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 				}
 
 				// 记录最大的更新时间
@@ -780,7 +798,7 @@ func (s *CacheRefreshService) refreshPluginPayTypesForPlugin(ctx context.Context
 
 	cacheKey := fmt.Sprintf("plugin_pay_types:%d", pluginID)
 	if data, err := json.Marshal(payTypes); err == nil {
-		_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+		_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 		// 更新关联关系的哈希值
 		s.setCachedRelationHash(ctx, cacheKey, payTypes)
 	}
@@ -824,7 +842,7 @@ func (s *CacheRefreshService) setCachedRelationHash(ctx context.Context, cacheKe
 		payTypeIDs[i] = pt.ID
 	}
 	hash := s.calculateRelationHash(payTypeIDs)
-	_ = s.redis.Set(ctx, hashKey, hash, s.cacheExpiry).Err()
+	_ = s.redis.Set(ctx, hashKey, hash, 0).Err()
 }
 
 // mapKeysToSlice 将 map 的 key 转换为 slice
@@ -853,7 +871,7 @@ func (s *CacheRefreshService) getTableUpdateTime(ctx context.Context, tableKey s
 
 // setTableUpdateTime 设置表的最后更新时间
 func (s *CacheRefreshService) setTableUpdateTime(ctx context.Context, tableKey string, updateTime time.Time) {
-	_ = s.redis.Set(ctx, tableKey, updateTime.Format(time.RFC3339Nano), s.cacheExpiry).Err()
+	_ = s.redis.Set(ctx, tableKey, updateTime.Format(time.RFC3339Nano), 0).Err()
 }
 
 // refreshTenantBalancesIncremental 增量刷新租户余额缓存（关键数据，必须每秒更新）
@@ -929,7 +947,7 @@ func (s *CacheRefreshService) refreshWriteoffsIncremental(ctx context.Context, s
 		cacheKey := fmt.Sprintf("writeoff:%d", writeoff.ID)
 
 		if data, err := json.Marshal(writeoff); err == nil {
-			_ = s.redis.Set(ctx, cacheKey, data, s.cacheExpiry).Err()
+			_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
 		}
 	}
 
@@ -1026,5 +1044,282 @@ func (s *CacheRefreshService) refreshWriteoffBalancesByIDs(ctx context.Context, 
 		} else {
 			_ = s.redis.Set(ctx, balanceKey, *writeoff.Balance, 0).Err()
 		}
+	}
+}
+
+// refreshMerchantPayChannelsIncremental 增量刷新商户支付通道关联缓存
+func (s *CacheRefreshService) refreshMerchantPayChannelsIncremental(ctx context.Context, since time.Time) {
+	tableKey := "table:dvadmin_merchant_pay_channel"
+
+	// 全量刷新时，直接查询所有关联
+	if since.IsZero() {
+		var merchantChannels []models.MerchantPayChannel
+		if err := s.dbNoLog.Model(&models.MerchantPayChannel{}).Find(&merchantChannels).Error; err != nil {
+			return
+		}
+
+		// 更新所有关联的缓存
+		var maxUpdateTime time.Time
+		for _, mc := range merchantChannels {
+			cacheKey := fmt.Sprintf("merchant_channel:%d:%d", mc.MerchantID, mc.PayChannelID)
+			if data, err := json.Marshal(mc); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+			}
+
+			if mc.UpdateDatetime != nil && mc.UpdateDatetime.After(maxUpdateTime) {
+				maxUpdateTime = *mc.UpdateDatetime
+			}
+		}
+
+		if !maxUpdateTime.IsZero() {
+			s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+		} else {
+			s.setTableUpdateTime(ctx, tableKey, time.Now())
+		}
+		return
+	}
+
+	// 增量刷新
+	var maxUpdateTime time.Time
+	s.dbNoLog.Model(&models.MerchantPayChannel{}).
+		Select("MAX(update_datetime) as max_time").
+		Scan(&maxUpdateTime)
+
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
+	}
+
+	var merchantChannels []models.MerchantPayChannel
+	query := s.dbNoLog.Model(&models.MerchantPayChannel{}).
+		Where("update_datetime > ? OR update_datetime IS NULL", since)
+
+	if err := query.Find(&merchantChannels).Error; err != nil {
+		return
+	}
+
+	for _, mc := range merchantChannels {
+		cacheKey := fmt.Sprintf("merchant_channel:%d:%d", mc.MerchantID, mc.PayChannelID)
+		if data, err := json.Marshal(mc); err == nil {
+			_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+		}
+
+		if mc.UpdateDatetime != nil && mc.UpdateDatetime.After(maxUpdateTime) {
+			maxUpdateTime = *mc.UpdateDatetime
+		}
+	}
+
+	if !maxUpdateTime.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	} else if tableLastUpdate.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, time.Now())
+	}
+}
+
+// refreshPayChannelTaxesIncremental 增量刷新租户通道费率缓存
+func (s *CacheRefreshService) refreshPayChannelTaxesIncremental(ctx context.Context, since time.Time) {
+	tableKey := "table:dvadmin_pay_channel_tax"
+
+	// 全量刷新时，直接查询所有费率
+	if since.IsZero() {
+		var channelTaxes []models.PayChannelTax
+		if err := s.dbNoLog.Model(&models.PayChannelTax{}).Find(&channelTaxes).Error; err != nil {
+			return
+		}
+
+		// 更新所有费率的缓存
+		var maxUpdateTime time.Time
+		for _, ct := range channelTaxes {
+			cacheKey := fmt.Sprintf("channel_tax:%d:%d", ct.PayChannelID, ct.TenantID)
+			if data, err := json.Marshal(ct); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+			}
+
+			if ct.UpdateDatetime != nil && ct.UpdateDatetime.After(maxUpdateTime) {
+				maxUpdateTime = *ct.UpdateDatetime
+			}
+		}
+
+		if !maxUpdateTime.IsZero() {
+			s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+		} else {
+			s.setTableUpdateTime(ctx, tableKey, time.Now())
+		}
+		return
+	}
+
+	// 增量刷新
+	var maxUpdateTime time.Time
+	s.dbNoLog.Model(&models.PayChannelTax{}).
+		Select("MAX(update_datetime) as max_time").
+		Scan(&maxUpdateTime)
+
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
+	}
+
+	var channelTaxes []models.PayChannelTax
+	query := s.dbNoLog.Model(&models.PayChannelTax{}).
+		Where("update_datetime > ? OR update_datetime IS NULL", since)
+
+	if err := query.Find(&channelTaxes).Error; err != nil {
+		return
+	}
+
+	for _, ct := range channelTaxes {
+		cacheKey := fmt.Sprintf("channel_tax:%d:%d", ct.PayChannelID, ct.TenantID)
+		if data, err := json.Marshal(ct); err == nil {
+			_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+		}
+
+		if ct.UpdateDatetime != nil && ct.UpdateDatetime.After(maxUpdateTime) {
+			maxUpdateTime = *ct.UpdateDatetime
+		}
+	}
+
+	if !maxUpdateTime.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	} else if tableLastUpdate.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, time.Now())
+	}
+}
+
+// refreshPayDomainsIncremental 增量刷新域名缓存
+func (s *CacheRefreshService) refreshPayDomainsIncremental(ctx context.Context, since time.Time) {
+	tableKey := "table:dvadmin_pay_domain"
+
+	// 全量刷新时，直接查询所有域名
+	if since.IsZero() {
+		var domains []models.PayDomain
+		if err := s.dbNoLog.Model(&models.PayDomain{}).Find(&domains).Error; err != nil {
+			return
+		}
+
+		// 更新所有域名的缓存（包括按 URL 的缓存和按上游类型的列表缓存）
+		var maxUpdateTime time.Time
+		domainsByUpstream := make(map[int][]models.PayDomain) // 按上游类型分组
+
+		for _, domain := range domains {
+			// 按 URL 缓存单个域名
+			cacheKey := fmt.Sprintf("domain_url:%s", domain.URL)
+			if data, err := json.Marshal(domain); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+			}
+
+			// 按上游类型分组
+			if domain.PayStatus {
+				domainsByUpstream[5] = append(domainsByUpstream[5], domain) // 支付宝
+			}
+			if domain.WechatStatus {
+				domainsByUpstream[6] = append(domainsByUpstream[6], domain) // 微信
+			}
+			if domain.Status {
+				domainsByUpstream[0] = append(domainsByUpstream[0], domain) // 全部
+			}
+
+			if domain.UpdateDatetime != nil && domain.UpdateDatetime.After(maxUpdateTime) {
+				maxUpdateTime = *domain.UpdateDatetime
+			}
+		}
+
+		// 更新按上游类型的列表缓存
+		for upstream, domainList := range domainsByUpstream {
+			var cacheKey string
+			switch upstream {
+			case 5:
+				cacheKey = "domains:alipay"
+			case 6:
+				cacheKey = "domains:wechat"
+			default:
+				cacheKey = "domains:all"
+			}
+			if data, err := json.Marshal(domainList); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+			}
+		}
+
+		if !maxUpdateTime.IsZero() {
+			s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+		} else {
+			s.setTableUpdateTime(ctx, tableKey, time.Now())
+		}
+		return
+	}
+
+	// 增量刷新
+	var maxUpdateTime time.Time
+	s.dbNoLog.Model(&models.PayDomain{}).
+		Select("MAX(update_datetime) as max_time").
+		Scan(&maxUpdateTime)
+
+	tableLastUpdate, _ := s.getTableUpdateTime(ctx, tableKey)
+	if !maxUpdateTime.IsZero() && !tableLastUpdate.IsZero() {
+		if !maxUpdateTime.After(tableLastUpdate) {
+			return
+		}
+	}
+
+	var domains []models.PayDomain
+	query := s.dbNoLog.Model(&models.PayDomain{}).
+		Where("update_datetime > ? OR update_datetime IS NULL", since)
+
+	if err := query.Find(&domains).Error; err != nil {
+		return
+	}
+
+	// 更新变更的域名缓存
+	for _, domain := range domains {
+		cacheKey := fmt.Sprintf("domain_url:%s", domain.URL)
+		if data, err := json.Marshal(domain); err == nil {
+			_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+		}
+
+		if domain.UpdateDatetime != nil && domain.UpdateDatetime.After(maxUpdateTime) {
+			maxUpdateTime = *domain.UpdateDatetime
+		}
+	}
+
+	// 增量刷新时，需要重新构建列表缓存（因为域名状态可能变化）
+	// 这里简化处理，直接全量刷新列表缓存
+	var allDomains []models.PayDomain
+	if err := s.dbNoLog.Model(&models.PayDomain{}).Find(&allDomains).Error; err == nil {
+		domainsByUpstream := make(map[int][]models.PayDomain)
+		for _, domain := range allDomains {
+			if domain.PayStatus {
+				domainsByUpstream[5] = append(domainsByUpstream[5], domain)
+			}
+			if domain.WechatStatus {
+				domainsByUpstream[6] = append(domainsByUpstream[6], domain)
+			}
+			if domain.Status {
+				domainsByUpstream[0] = append(domainsByUpstream[0], domain)
+			}
+		}
+
+		for upstream, domainList := range domainsByUpstream {
+			var cacheKey string
+			switch upstream {
+			case 5:
+				cacheKey = "domains:alipay"
+			case 6:
+				cacheKey = "domains:wechat"
+			default:
+				cacheKey = "domains:all"
+			}
+			if data, err := json.Marshal(domainList); err == nil {
+				_ = s.redis.Set(ctx, cacheKey, data, 0).Err()
+			}
+		}
+	}
+
+	if !maxUpdateTime.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, maxUpdateTime)
+	} else if tableLastUpdate.IsZero() {
+		s.setTableUpdateTime(ctx, tableKey, time.Now())
 	}
 }

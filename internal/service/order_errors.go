@@ -13,25 +13,30 @@ func (e *OrderError) Error() string {
 
 // 订单错误码定义
 const (
-	ErrCodeAmountInvalid       = 0
-	ErrCodeMerchantNotFound    = 7301
-	ErrCodeMerchantDisabled    = 7302
-	ErrCodeSignInvalid         = 7304
-	ErrCodeChannelNotFound     = 7305
-	ErrCodeChannelDisabled     = 7306
-	ErrCodeChannelTimeInvalid  = 7309
-	ErrCodeAmountZero          = 7312
-	ErrCodeAmountOutOfRange    = 7313
-	ErrCodeBalanceInsufficient = 7315
-	ErrCodePluginUnavailable   = 7316
-	ErrCodePayTypeUnavailable  = 7317
-	ErrCodeNoStock             = 7318
-	ErrCodeExtraCheckFailed    = 7319
-	ErrCodeCreateFailed        = 7320
-	ErrCodeOutOrderNoRequired  = 7321
-	ErrCodeOutOrderNoExists    = 7321
-	ErrCodeDomainUnavailable   = 7314
-	ErrCodeSystemBusy          = 9999
+	ErrCodeAmountInvalid            = 0
+	ErrCodeMerchantNotFound         = 7301
+	ErrCodeMerchantDisabled         = 7302
+	ErrCodeSignInvalid              = 7304
+	ErrCodeChannelNotFound          = 7305
+	ErrCodeChannelDisabled          = 7306
+	ErrCodeMerchantChannelNotFound  = 7307
+	ErrCodeMerchantChannelDisabled  = 7308
+	ErrCodeChannelTimeInvalid       = 7309
+	ErrCodeTenantChannelUnavailable = 7310
+	ErrCodeTenantChannelDisabled    = 7311
+	ErrCodeAmountZero               = 7312
+	ErrCodeAmountOutOfRange         = 7313
+	ErrCodeDomainUnavailable        = 7314
+	ErrCodeBalanceInsufficient      = 7315
+	ErrCodePluginUnavailable        = 7316
+	ErrCodePayTypeUnavailable       = 7317
+	ErrCodeNoStock                  = 7318
+	ErrCodeExtraCheckFailed         = 7319
+	ErrCodeCreateFailed             = 7320
+	ErrCodeOutOrderNoRequired       = 7321
+	ErrCodeOutOrderNoExists         = 7321
+	ErrCodeConcurrencyLimit         = 7322
+	ErrCodeSystemBusy               = 9999
 )
 
 // 错误消息定义

@@ -618,6 +618,7 @@ func (s *OrderService) validateOutOrderNo(ctx context.Context, orderCtx *OrderCr
 }
 
 // validateChannel 验证渠道
+// 参考 Python: order_check_channel
 // 注意：渠道信息从缓存获取，缓存刷新服务每秒更新一次，确保限额等限制的一致性
 func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreateContext, channelID int64) *OrderError {
 	// 从缓存获取渠道信息（缓存刷新服务每秒更新，确保一致性）
@@ -626,18 +627,17 @@ func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreat
 		return ErrChannelNotFound
 	}
 
+	// 测试模式：直接设置通道信息并返回，跳过后续检查
+	if orderCtx.Test {
+		orderCtx.Channel = channel
+		orderCtx.ChannelID = channelID
+		orderCtx.PluginID = channel.PluginID
+		return nil
+	}
+
+	// 检查通道状态
 	if !channel.Status {
 		return ErrChannelDisabled
-	}
-
-	// 检查时间范围（基于缓存的渠道信息）
-	if err := s.checkChannelTime(channel); err != nil {
-		return err
-	}
-
-	// 检查金额范围（基于缓存的渠道信息，确保限额一致性）
-	if err := s.checkChannelAmount(channel, orderCtx); err != nil {
-		return err
 	}
 
 	// 先设置 ChannelID，因为后续计算手续费需要用到
@@ -645,18 +645,66 @@ func (s *OrderService) validateChannel(ctx context.Context, orderCtx *OrderCreat
 	orderCtx.ChannelID = channelID
 	orderCtx.PluginID = channel.PluginID
 
+	// 检查时间范围（基于缓存的渠道信息）
+	if err := s.checkChannelTime(channel); err != nil {
+		return err
+	}
+
 	// 计算商户手续费（浮动前金额）
-	// 参考 Python: _order_check_merchant_channel
+	// 参考 Python: _order_check_merchant_channel(ctx)
 	if err := s.calculateMerchantTax(ctx, orderCtx); err != nil {
 		return err
 	}
 
+	// 检查租户通道费率并计算手续费（浮动前金额）
+	// 参考 Python: _order_check_tenant_channel(ctx)
+	// 注意：Python 代码中虽然注释说"浮动后"，但实际在浮动前调用，使用的是浮动前的金额
+	if err := s.checkAndCalculateTenantTax(ctx, orderCtx); err != nil {
+		return err
+	}
+
+	// 检查固定金额模式（浮动前金额）
+	// 参考 Python: if channel.moneys: 检查金额是否在通道固定金额内
+	if channel.Settled && channel.Moneys != "" {
+		var moneys []int
+		if err := json.Unmarshal([]byte(channel.Moneys), &moneys); err == nil {
+			valid := false
+			for _, m := range moneys {
+				if m == orderCtx.Money {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return NewOrderError(ErrCodeAmountOutOfRange,
+					fmt.Sprintf("金额%d不在范围内,可用:%v", orderCtx.Money, moneys))
+			}
+		}
+	}
+
 	// 应用浮动加价（基于缓存的渠道信息）
+	// 参考 Python: ctx.money += random.randint(channel.float_min_money, channel.float_max_money)
 	s.applyFloatAmount(channel, orderCtx)
 
-	// 计算租户手续费（浮动后金额）
-	// 参考 Python: _order_check_tenant_channel
-	if err := s.calculateTenantTax(ctx, orderCtx); err != nil {
+	// 检查金额不能为0（浮动后）
+	// 参考 Python: if ctx.money == 0: raise OrderProcessingError
+	if orderCtx.Money == 0 {
+		return NewOrderError(ErrCodeAmountInvalid, "金额不能为0")
+	}
+
+	// 检查单笔金额大小（浮动后金额）
+	// 参考 Python: if ctx.channel.min_money != ctx.channel.max_money != 0 and ...
+	if channel.MinMoney != 0 || channel.MaxMoney != 0 {
+		if orderCtx.Money < channel.MinMoney || orderCtx.Money > channel.MaxMoney {
+			return NewOrderError(ErrCodeAmountOutOfRange,
+				fmt.Sprintf("金额%d不在范围[%d,%d]内", orderCtx.Money, channel.MinMoney, channel.MaxMoney))
+		}
+	}
+
+	// 重新计算租户手续费（浮动后金额）
+	// 注意：Python 代码中虽然在浮动前就计算了（使用浮动前金额），但根据业务逻辑和注释说明，
+	// 手续费应该基于浮动后的金额计算。这里使用浮动后的金额重新计算
+	if err := s.recalculateTenantTaxAfterFloat(ctx, orderCtx); err != nil {
 		return err
 	}
 
@@ -731,12 +779,12 @@ func (s *OrderService) validateDomain(ctx context.Context, orderCtx *OrderCreate
 				}
 			}
 		}
-		// 如果缓存中没有，尝试从数据库查找（降级方案）
-		var domain models.PayDomain
-		if err := database.DB.Where("url = ?", domainURL).First(&domain).Error; err == nil {
+		// 如果缓存中没有，尝试使用缓存服务从数据库查找（降级方案）
+		domain, err := s.cacheService.GetPayDomainByURL(ctx, domainURL)
+		if err == nil {
 			orderCtx.DomainID = &domain.ID
 			orderCtx.DomainURL = domain.URL
-			orderCtx.Domain = &domain
+			orderCtx.Domain = domain
 			return nil
 		}
 		// 如果数据库中没有，直接使用插件设置的域名URL
@@ -875,35 +923,10 @@ func (s *OrderService) checkChannelTime(channel *models.PayChannel) *OrderError 
 	return nil
 }
 
-// checkChannelAmount 检查渠道金额限制
-// 注意：渠道信息来自缓存，缓存刷新服务每秒更新，确保限额一致性
+// checkChannelAmount 检查渠道金额限制（已废弃，逻辑已移至 validateChannel）
+// 注意：此方法保留是为了向后兼容，实际逻辑已在 validateChannel 中实现
 func (s *OrderService) checkChannelAmount(channel *models.PayChannel, orderCtx *OrderCreateContext) *OrderError {
-	// 检查固定金额模式
-	if channel.Settled && channel.Moneys != "" {
-		var moneys []int
-		if err := json.Unmarshal([]byte(channel.Moneys), &moneys); err == nil {
-			valid := false
-			for _, m := range moneys {
-				if m == orderCtx.Money {
-					valid = true
-					break
-				}
-			}
-			if !valid {
-				return NewOrderError(ErrCodeAmountOutOfRange,
-					fmt.Sprintf("金额%d不在范围内,可用:%v", orderCtx.Money, moneys))
-			}
-		}
-	}
-
-	// 检查金额范围
-	if channel.MinMoney > 0 || channel.MaxMoney > 0 {
-		if orderCtx.Money < channel.MinMoney || orderCtx.Money > channel.MaxMoney {
-			return NewOrderError(ErrCodeAmountOutOfRange,
-				fmt.Sprintf("金额%d不在范围[%d,%d]内", orderCtx.Money, channel.MinMoney, channel.MaxMoney))
-		}
-	}
-
+	// 此方法已不再使用，逻辑已移至 validateChannel
 	return nil
 }
 
@@ -916,12 +939,37 @@ func (s *OrderService) calculateMerchantTax(ctx context.Context, orderCtx *Order
 		return nil
 	}
 
-	// 查询商户支付通道关联
-	var merchantChannel models.MerchantPayChannel
-	if err := database.DB.Where("merchant_id = ? AND pay_channel_id = ?", orderCtx.MerchantID, orderCtx.ChannelID).First(&merchantChannel).Error; err != nil {
-		// 如果查询失败，手续费为0（容错处理）
-		orderCtx.MerchantTax = 0
-		return nil
+	// 使用缓存服务查询商户支付通道关联
+	merchantChannel, err := s.cacheService.GetMerchantPayChannel(ctx, orderCtx.MerchantID, orderCtx.ChannelID)
+	if err != nil {
+		// 参考 Python: if merchant_channel is None: raise OrderProcessingError
+		return NewOrderError(ErrCodeMerchantChannelNotFound, "商户通道不存在")
+	}
+
+	// 检查商户通道状态
+	// 参考 Python: if not merchant_channel.status: raise OrderProcessingError
+	if merchantChannel.Status != 1 {
+		return NewOrderError(ErrCodeMerchantChannelDisabled, "商户通道已被禁用,请联系管理员")
+	}
+
+	// 检查商户通道并发限制
+	// 参考 Python: if 0 < merchant_channel.limit < Order.objects.filter(...).count()
+	// 注意：需要从数据库查询 limit 字段，因为模型中没有定义
+	var limit int
+	if err := database.DB.Table("dvadmin_merchant_pay_channel").
+		Select("limit").
+		Where("merchant_id = ? AND pay_channel_id = ?", orderCtx.MerchantID, orderCtx.ChannelID).
+		Scan(&limit).Error; err == nil && limit > 0 {
+		var count int64
+		oneMinuteAgo := time.Now().Add(-60 * time.Second)
+		if err := database.DB.Model(&models.Order{}).
+			Where("merchant_id = ? AND pay_channel_id = ? AND create_datetime >= ?",
+				orderCtx.MerchantID, orderCtx.ChannelID, oneMinuteAgo).
+			Count(&count).Error; err == nil {
+			if int64(limit) < count {
+				return NewOrderError(ErrCodeConcurrencyLimit, "并发数太大，请减少并发量")
+			}
+		}
 	}
 
 	// 如果费率为0，手续费为0
@@ -934,6 +982,79 @@ func (s *OrderService) calculateMerchantTax(ctx context.Context, orderCtx *Order
 	// 公式: int(商户费率 * 订单金额(浮动前) / 100)
 	tax := int(merchantChannel.Tax * float64(orderCtx.Money) / 100.0)
 	orderCtx.MerchantTax = tax
+
+	return nil
+}
+
+// checkAndCalculateTenantTax 检查租户通道费率并计算手续费（浮动前金额）
+// 参考 Python: _order_check_tenant_channel(ctx)
+// 注意：Python 代码中虽然注释说"浮动后"，但实际在浮动前调用，使用的是浮动前的金额
+func (s *OrderService) checkAndCalculateTenantTax(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	if orderCtx.TenantID == 0 || orderCtx.ChannelID == 0 {
+		orderCtx.Tax = 0
+		return nil
+	}
+
+	// 使用缓存服务查询租户通道费率
+	channelTax, err := s.cacheService.GetPayChannelTax(ctx, orderCtx.ChannelID, orderCtx.TenantID)
+	if err != nil {
+		// 参考 Python: if channel_tax is None: raise OrderProcessingError
+		return NewOrderError(ErrCodeTenantChannelUnavailable, "该通道对商户不可用")
+	}
+
+	// 检查租户通道费率状态
+	// 参考 Python: if not channel_tax.status: raise OrderProcessingError
+	if !channelTax.Status {
+		return NewOrderError(ErrCodeTenantChannelUnavailable, "该通道对商户不可用")
+	}
+
+	// 计算手续费（浮动前金额）
+	// 参考 Python: if channel_tax.tax != 0: ctx.tax = max(int(channel_tax.tax * ctx.money / 100 + Decimal(0.5)), 1)
+	// 注意：Python 代码中虽然注释说"浮动后"，但实际使用的是浮动前的 ctx.money
+	if channelTax.Tax != 0 {
+		// 手续费计算公式: 浮动前金额 * 费率 / 100，四舍五入，最低扣除1分
+		calculatedTax := channelTax.Tax * float64(orderCtx.Money) / 100.0
+		tax := int(calculatedTax + 0.5) // 四舍五入
+		if tax < 1 {
+			tax = 1
+		}
+		orderCtx.Tax = tax
+	} else {
+		orderCtx.Tax = 0
+	}
+
+	return nil
+}
+
+// recalculateTenantTaxAfterFloat 重新计算租户手续费（浮动后金额）
+// 注意：Python 代码中在浮动前就计算了，但根据业务逻辑，应该在浮动后重新计算
+// 这里使用浮动后的金额重新计算，确保手续费基于实际支付金额
+func (s *OrderService) recalculateTenantTaxAfterFloat(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
+	if orderCtx.TenantID == 0 || orderCtx.ChannelID == 0 {
+		return nil
+	}
+
+	// 使用缓存服务查询租户通道费率
+	channelTax, err := s.cacheService.GetPayChannelTax(ctx, orderCtx.ChannelID, orderCtx.TenantID)
+	if err != nil {
+		// 如果查询失败，保持原值（已经在 checkAndCalculateTenantTax 中设置）
+		return nil
+	}
+
+	// 如果费率为0，手续费为0
+	if channelTax.Tax == 0 {
+		orderCtx.Tax = 0
+		return nil
+	}
+
+	// 重新计算手续费（浮动后金额）
+	// 公式: max(int(通道费率 * 订单金额(浮动后) / 100 + 0.5), 1)
+	calculatedTax := channelTax.Tax * float64(orderCtx.Money) / 100.0
+	tax := int(calculatedTax + 0.5) // 四舍五入
+	if tax < 1 {
+		tax = 1
+	}
+	orderCtx.Tax = tax
 
 	return nil
 }
@@ -956,17 +1077,14 @@ func (s *OrderService) calculateTenantTax(ctx context.Context, orderCtx *OrderCr
 		return nil
 	}
 
-	// 查询租户通道费率
+	// 使用缓存服务查询租户通道费率
 	// 注意：Python 代码中没有过滤 status，所以这里也不过滤
-	var channelTax models.PayChannelTax
-	query := database.DB.Where("pay_channel_id = ? AND tenant_id = ?", orderCtx.ChannelID, orderCtx.TenantID)
-
-	// 记录查询SQL，帮助调试
 	logger.Logger.Debug("查询租户通道费率",
 		zap.Int64("pay_channel_id", orderCtx.ChannelID),
 		zap.Int64("tenant_id", orderCtx.TenantID))
 
-	if err := query.First(&channelTax).Error; err != nil {
+	channelTax, err := s.cacheService.GetPayChannelTax(ctx, orderCtx.ChannelID, orderCtx.TenantID)
+	if err != nil {
 		// 如果查询失败，手续费为0（容错处理）
 		// 参考 Python: 如果 channel_tax 不存在，不会设置 ctx.tax（保持原值0）
 		logger.Logger.Warn("查询租户通道费率失败，手续费为0",
@@ -974,7 +1092,7 @@ func (s *OrderService) calculateTenantTax(ctx context.Context, orderCtx *OrderCr
 			zap.Int64("tenant_id", orderCtx.TenantID),
 			zap.Error(err))
 
-		// 尝试查询所有匹配的记录，帮助调试
+		// 尝试查询所有匹配的记录，帮助调试（仅调试时使用，不缓存）
 		var allTaxes []models.PayChannelTax
 		if err2 := database.DB.Where("pay_channel_id = ?", orderCtx.ChannelID).Find(&allTaxes).Error; err2 == nil {
 			logger.Logger.Info("该通道的所有费率记录",
@@ -1033,19 +1151,18 @@ func (s *OrderService) calculateTenantTax(ctx context.Context, orderCtx *OrderCr
 }
 
 // applyFloatAmount 应用浮动加价
+// 参考 Python: ctx.money += random.randint(channel.float_min_money, channel.float_max_money)
 func (s *OrderService) applyFloatAmount(channel *models.PayChannel, orderCtx *OrderCreateContext) {
-	if channel.FloatMinMoney > 0 || channel.FloatMaxMoney > 0 {
+	// 参考 Python: if not (channel.float_min_money == channel.float_max_money == 0):
+	if !(channel.FloatMinMoney == 0 && channel.FloatMaxMoney == 0) {
 		delta := channel.FloatMinMoney
 		if channel.FloatMaxMoney > channel.FloatMinMoney {
+			// 参考 Python: random.randint(channel.float_min_money, channel.float_max_money)
 			delta = channel.FloatMinMoney + rand.Intn(channel.FloatMaxMoney-channel.FloatMinMoney+1)
 		}
 		orderCtx.Money += delta
 	}
-
-	if orderCtx.Money <= 0 {
-		// 如果金额变为0或负数，恢复原金额
-		orderCtx.Money = orderCtx.NotifyMoney
-	}
+	// 注意：金额为0的检查已在 validateChannel 中处理，这里不再恢复
 }
 
 // createOrderAndDetail 创建订单和订单详情，返回订单详情ID（避免后续重复查询）
