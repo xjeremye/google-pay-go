@@ -137,6 +137,12 @@ func (s *OrderSuccessHookService) callbackStatistics(ctx context.Context, data *
 		s.callbackWriteoffSuccess(ctx, data)
 	}
 
+	// 5.1 核销通道统计（需要从订单详情中获取最终核销手续费和实际扣除金额）
+	// 注意：订单成功和退款都使用同一个方法，但传入的参数不同
+	if data.WriteoffID != nil && data.ChannelID > 0 {
+		s.callbackWriteoffChannelSuccess(ctx, data)
+	}
+
 	// 6. 全局统计
 	s.callbackDaySuccess(ctx, data)
 }
@@ -323,6 +329,95 @@ func (s *OrderSuccessHookService) callbackWriteoffSuccess(ctx context.Context, d
 		zap.Int64("writeoff_id", *data.WriteoffID),
 		zap.Int("money", data.Money))
 	// TODO: 实现核销预付款更新
+}
+
+// callbackWriteoffChannelSuccess 核销通道统计回调
+// 参考 Python: callback_writeoff_channel_tax_success (订单成功) 和 callback_writeoff_tax_refund (订单退款)
+// 根据文档：
+// - 订单成功时：success_money += real_money, total_tax += parent_tax_money
+// - 订单退款时：success_money -= flow.money, total_tax -= flow.tax（使用负数）
+func (s *OrderSuccessHookService) callbackWriteoffChannelSuccess(ctx context.Context, data *OrderSuccessData) {
+	if data.WriteoffID == nil || data.ChannelID == 0 {
+		return
+	}
+
+	// 查询订单详情以获取最终核销手续费和实际扣除金额
+	// 这些值在 status_updater.go 中已经计算并记录到 WriteoffCashflow 中
+	// 订单成功时：flow_type=1（跑量流水）
+	// 订单退款时：需要查找订单成功时的流水记录（flow_type=1）
+	var cashflow models.WriteoffCashflow
+	flowType := models.WriteoffCashflowTypeRunVolume // 1=跑量流水
+
+	// 根据文档：订单退款时，只有 order_before in [4, 6] 的订单才能退款（成功订单）
+	// 订单成功时：直接查找跑量流水
+	// 订单退款时：也需要查找跑量流水（订单成功时的流水记录）
+	if err := database.DB.Where("order_id = ? AND writeoff_id = ? AND flow_type = ?", data.OrderID, *data.WriteoffID, flowType).
+		First(&cashflow).Error; err != nil {
+		logger.Logger.Warn("查询核销流水失败，跳过核销通道统计",
+			zap.String("order_no", data.OrderNo),
+			zap.String("order_id", data.OrderID),
+			zap.Int64("writeoff_id", *data.WriteoffID),
+			zap.Error(err))
+		return
+	}
+
+	// real_money = -cashflow.ChangeMoney（因为 ChangeMoney 是负数，表示扣减）
+	// 根据文档：success_money 记录的是实际扣除金额（real_money）
+	realMoney := -cashflow.ChangeMoney
+
+	// parent_tax_money = int(最终核销费率 × 订单金额 / 100)
+	// 根据文档：total_tax 记录的是最终核销手续费（parent_tax_money）
+	// 从 cashflow.Tax 获取费率，然后计算手续费
+	// 但更简单的方式是：parent_tax_money = 订单金额 - real_money
+	parentTaxMoney := int64(data.Money) - realMoney
+
+	// 判断是订单成功还是退款
+	// 根据文档：订单退款时，使用负数更新统计
+	// 如果 OrderBefore 是成功状态（4=支付成功，6=支付成功通知已返回），且当前是退款状态，则使用负数
+	// 但这里我们通过查询订单状态来判断
+	var order models.Order
+	if err := database.DB.Select("order_status").Where("id = ?", data.OrderID).First(&order).Error; err == nil {
+		// 如果是退款状态，使用负数
+		if order.OrderStatus == models.OrderStatusRefunded {
+			// 订单退款：使用负数回退统计
+			realMoney = -realMoney
+			// 计算 parent_tax_money：从 cashflow.Tax（费率）和订单金额计算
+			// parent_tax_money = int(cashflow.Tax * 订单金额 / 100)
+			parentTaxMoney = int64(cashflow.Tax * float64(data.Money) / 100.0)
+			parentTaxMoney = -parentTaxMoney // 使用负数
+
+			logger.Logger.Info("核销通道统计回调（退款）",
+				zap.String("order_no", data.OrderNo),
+				zap.Int64("writeoff_id", *data.WriteoffID),
+				zap.Int64("channel_id", data.ChannelID),
+				zap.Int64("real_money", -realMoney),            // 显示原始值
+				zap.Int64("parent_tax_money", -parentTaxMoney), // 显示原始值
+				zap.Int("money", data.Money))
+		} else {
+			// 订单成功：使用正数
+			logger.Logger.Info("核销通道统计回调（成功）",
+				zap.String("order_no", data.OrderNo),
+				zap.Int64("writeoff_id", *data.WriteoffID),
+				zap.Int64("channel_id", data.ChannelID),
+				zap.Int64("real_money", realMoney),
+				zap.Int64("parent_tax_money", parentTaxMoney),
+				zap.Int("money", data.Money))
+		}
+	}
+
+	statsService := NewStatisticsService()
+	stats := &models.WriteOffChannelDayStatistics{
+		WriteoffID:   data.WriteoffID,
+		PayChannelID: &data.ChannelID,
+	}
+
+	if err := statsService.SuccessBaseDayStatistics(ctx, stats, realMoney, parentTaxMoney, data.CreateDatetime, nil); err != nil {
+		logger.Logger.Error("核销通道统计失败",
+			zap.String("order_no", data.OrderNo),
+			zap.Int64("writeoff_id", *data.WriteoffID),
+			zap.Int64("channel_id", data.ChannelID),
+			zap.Error(err))
+	}
 }
 
 // callbackDaySuccess 全局日统计回调

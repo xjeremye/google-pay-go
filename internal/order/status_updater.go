@@ -407,6 +407,74 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 						zap.Float64("child_tax", childTax))
 				}
 			}
+		case models.OrderStatusRefunded:
+			// 订单退款：需要回退核销余额和统计
+			// 根据文档：只有 order_before in [4, 6] 的订单才能退款（成功订单）
+			// 查找订单成功时的流水记录（flow_type=1，跑量流水）
+			if order.WriteoffID != nil && order.PayChannelID != nil {
+				var cashflow models.WriteoffCashflow
+				if err := tx.Where("order_id = ? AND writeoff_id = ? AND flow_type = ?", req.OrderID, *order.WriteoffID, models.WriteoffCashflowTypeRunVolume).
+					First(&cashflow).Error; err == nil {
+					// 回退余额：增加余额（因为 ChangeMoney 是负数，所以用负数回退）
+					// ChangeMoney 是负数（扣减），所以回退时应该增加，即 -ChangeMoney
+					realDeductAmount := -cashflow.ChangeMoney
+
+					// 查询变更前的余额（使用 SELECT FOR UPDATE 确保一致性）
+					var writeoff models.Writeoff
+					if err := tx.Set("gorm:query_option", "FOR UPDATE").
+						Where("id = ?", *order.WriteoffID).First(&writeoff).Error; err == nil {
+						var oldBalance, newBalance int64
+						if writeoff.Balance != nil {
+							oldBalance = *writeoff.Balance
+
+							// 回退余额：增加余额
+							if err := tx.Model(&models.Writeoff{}).
+								Where("id = ? AND balance IS NOT NULL", *order.WriteoffID).
+								Update("balance", gorm.Expr("balance + ?", realDeductAmount)).Error; err != nil {
+								tx.Rollback()
+								return fmt.Errorf("回退码商余额失败: %w", err)
+							}
+
+							// 重新查询回退后的余额
+							var updatedWriteoff models.Writeoff
+							if err := tx.Select("balance").Where("id = ?", *order.WriteoffID).First(&updatedWriteoff).Error; err == nil {
+								if updatedWriteoff.Balance != nil {
+									newBalance = *updatedWriteoff.Balance
+								} else {
+									newBalance = 0
+								}
+							}
+						} else {
+							oldBalance = 0
+							newBalance = 0
+						}
+
+						// 记录退款流水
+						refundCashflow := &models.WriteoffCashflow{
+							OldMoney:       oldBalance,
+							NewMoney:       newBalance,
+							ChangeMoney:    realDeductAmount,                  // 正数表示增加（回退）
+							FlowType:       models.WriteoffCashflowTypeRefund, // 8=订单退款
+							Tax:            cashflow.Tax,                      // 使用原流水的费率
+							OrderID:        &req.OrderID,
+							PayChannelID:   order.PayChannelID,
+							WriteoffID:     *order.WriteoffID,
+							CreateDatetime: &now,
+						}
+						if err := tx.Create(refundCashflow).Error; err != nil {
+							tx.Rollback()
+							return fmt.Errorf("记录码商退款流水失败: %w", err)
+						}
+
+						logger.Logger.Info("订单退款，已回退核销余额",
+							zap.String("order_id", req.OrderID),
+							zap.Int64("writeoff_id", *order.WriteoffID),
+							zap.Int64("old_balance", oldBalance),
+							zap.Int64("new_balance", newBalance),
+							zap.Int64("real_deduct_amount", realDeductAmount))
+					}
+				}
+			}
 		case models.OrderStatusFailed, models.OrderStatusClosed:
 			// 订单失败/取消/过期：码商余额不需要处理（码商没有预占余额的概念）
 			// 码商余额只在支付成功时扣减

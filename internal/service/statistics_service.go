@@ -44,6 +44,8 @@ func (s *StatisticsService) SuccessBaseDayStatistics(
 		return s.successTenantDayStatistics(ctx, v, successMoney, tax, dateOnly, updateFields)
 	case *models.WriteOffDayStatistics:
 		return s.successWriteoffDayStatistics(ctx, v, successMoney, tax, dateOnly, updateFields)
+	case *models.WriteOffChannelDayStatistics:
+		return s.successWriteoffChannelDayStatistics(ctx, v, successMoney, tax, dateOnly, updateFields)
 	case *models.DayStatistics:
 		return s.successDayStatistics(ctx, v, successMoney, tax, dateOnly, updateFields)
 	default:
@@ -311,6 +313,137 @@ func (s *StatisticsService) successWriteoffDayStatistics(
 
 	if err != nil {
 		return fmt.Errorf("创建/更新核销日统计失败: %w", err)
+	}
+
+	return nil
+}
+
+// successWriteoffChannelDayStatistics 更新核销通道日统计
+// 参考 Python: success_base_day_statistics(WriteOffChannelDayStatistics, ...)
+func (s *StatisticsService) successWriteoffChannelDayStatistics(
+	ctx context.Context,
+	stats *models.WriteOffChannelDayStatistics,
+	successMoney int64,
+	tax int64,
+	date time.Time,
+	updateFields map[string]interface{},
+) error {
+	// 记录日志，帮助调试
+	logger.Logger.Info("更新核销通道日统计",
+		zap.Int64("writeoff_id", *stats.WriteoffID),
+		zap.Int64("pay_channel_id", *stats.PayChannelID),
+		zap.Time("date", date),
+		zap.Int64("success_money", successMoney),
+		zap.Int64("tax", tax))
+
+	// 设置默认值
+	if stats.SuccessCount == 0 {
+		stats.SuccessCount = 1
+	}
+	if stats.SuccessMoney == 0 {
+		stats.SuccessMoney = successMoney
+	}
+	if stats.TotalTax == 0 {
+		stats.TotalTax = tax
+	}
+	if stats.Ver == 0 {
+		stats.Ver = 1
+	}
+	stats.Date = date
+
+	// 合并更新字段
+	doUpdatesMap := map[string]interface{}{
+		"success_count": gorm.Expr("success_count + 1"),
+		"success_money": gorm.Expr("success_money + ?", successMoney),
+		"total_tax":     gorm.Expr("total_tax + ?", tax),
+		"ver":           gorm.Expr("ver + 1"),
+	}
+
+	// 添加额外的更新字段
+	for k, v := range updateFields {
+		doUpdatesMap[k] = v
+	}
+
+	if stats.WriteoffID == nil {
+		return fmt.Errorf("核销通道统计缺少 writeoff_id")
+	}
+	if stats.PayChannelID == nil {
+		return fmt.Errorf("核销通道统计缺少 pay_channel_id")
+	}
+
+	// 唯一约束: (date, writeoff_id, pay_channel_id)
+	err := database.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "date"},
+			{Name: "writeoff_id"},
+			{Name: "pay_channel_id"},
+		},
+		DoUpdates: clause.Assignments(doUpdatesMap),
+	}).Create(stats).Error
+
+	if err != nil {
+		return fmt.Errorf("创建/更新核销通道日统计失败: %w", err)
+	}
+
+	return nil
+}
+
+// SubmitBaseDayStatistics 提交日统计（通用方法）
+// 参考 Python: submit_base_day_statistics
+func (s *StatisticsService) SubmitBaseDayStatistics(
+	ctx context.Context,
+	stats interface{},
+	date time.Time,
+) error {
+	// 获取日期（只取日期部分，忽略时间）
+	dateOnly := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+
+	// 根据类型选择不同的处理方式
+	switch v := stats.(type) {
+	case *models.WriteOffChannelDayStatistics:
+		return s.submitWriteoffChannelDayStatistics(ctx, v, dateOnly)
+	default:
+		return fmt.Errorf("不支持的统计类型: %T", stats)
+	}
+}
+
+// submitWriteoffChannelDayStatistics 更新核销通道日统计（订单提交时）
+// 参考 Python: submit_base_day_statistics(WriteOffChannelDayStatistics, ...)
+func (s *StatisticsService) submitWriteoffChannelDayStatistics(
+	ctx context.Context,
+	stats *models.WriteOffChannelDayStatistics,
+	date time.Time,
+) error {
+	stats.Date = date
+	if stats.SubmitCount == 0 {
+		stats.SubmitCount = 1
+	}
+	if stats.Ver == 0 {
+		stats.Ver = 1
+	}
+
+	if stats.WriteoffID == nil {
+		return fmt.Errorf("核销通道统计缺少 writeoff_id")
+	}
+	if stats.PayChannelID == nil {
+		return fmt.Errorf("核销通道统计缺少 pay_channel_id")
+	}
+
+	// 唯一约束: (date, writeoff_id, pay_channel_id)
+	err := database.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "date"},
+			{Name: "writeoff_id"},
+			{Name: "pay_channel_id"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"submit_count": gorm.Expr("submit_count + 1"),
+			"ver":          gorm.Expr("ver + 1"),
+		}),
+	}).Create(stats).Error
+
+	if err != nil {
+		return fmt.Errorf("创建/更新核销通道日统计失败: %w", err)
 	}
 
 	return nil

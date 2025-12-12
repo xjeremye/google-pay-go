@@ -114,3 +114,27 @@ type WriteOffDayStatistics struct {
 func (WriteOffDayStatistics) TableName() string {
 	return "dvadmin_day_statistics_writeoff"
 }
+
+// WriteOffChannelDayStatistics 核销通道日统计模型
+// 表名: dvadmin_day_statistics_channel_writeoff
+// 唯一约束: (date, writeoff_id, pay_channel_id)
+type WriteOffChannelDayStatistics struct {
+	ID           int64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	SuccessCount int       `gorm:"not null;default:0;comment:成功订单数" json:"success_count"`
+	SubmitCount  int       `gorm:"not null;default:0;comment:总提交订单数" json:"submit_count"`
+	SuccessMoney int64     `gorm:"not null;default:0;comment:总收入" json:"success_money"`
+	TotalTax     int64     `gorm:"not null;default:0;comment:总利润" json:"total_tax"`
+	Date         time.Time `gorm:"type:date;not null;comment:日期" json:"date"`
+	Ver          int64     `gorm:"not null;comment:版本号" json:"ver"`
+	PayChannelID *int64    `gorm:"index;comment:关联支付通道" json:"pay_channel_id,omitempty"`
+	WriteoffID   *int64    `gorm:"index;comment:核销" json:"writeoff_id,omitempty"`
+	UnknownCount int       `gorm:"not null;default:0;comment:未知设备订单数" json:"unknown_count"`
+	AndroidCount int       `gorm:"not null;default:0;comment:安卓订单数" json:"android_count"`
+	IOSCount     int       `gorm:"not null;default:0;comment:苹果订单数" json:"ios_count"`
+	PCCount      int       `gorm:"not null;default:0;comment:电脑(web)订单数" json:"pc_count"`
+}
+
+// TableName 指定表名
+func (WriteOffChannelDayStatistics) TableName() string {
+	return "dvadmin_day_statistics_channel_writeoff"
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/golang-pay-core/internal/logger"
 	"github.com/golang-pay-core/internal/models"
 	"github.com/golang-pay-core/internal/plugin"
+	"github.com/golang-pay-core/internal/service"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -157,9 +158,77 @@ func (p *BasePlugin) CallbackSubmit(ctx context.Context, req *plugin.CallbackSub
 		// 不返回错误，避免影响主流程
 	}
 
-	// 3. 更新全局日统计（submit_count 和 submit_money）
-	// 参考 Python: 全局统计也需要更新提交统计
+	// 3. 更新 PayChannelDayStatistics 的 submit_count（通道日统计）
+	// 根据文档：订单创建时应该更新通道统计的 submit_count
 	date := time.Date(createDatetime.Year(), createDatetime.Month(), createDatetime.Day(), 0, 0, 0, 0, createDatetime.Location())
+	channelStats := models.PayChannelDayStatistics{
+		Date:         date,
+		PayChannelID: &req.ChannelID,
+		SubmitCount:  1,
+		Ver:          1,
+	}
+
+	// 设置可选的关联字段
+	if req.TenantID > 0 {
+		channelStats.TenantID = &req.TenantID
+	}
+	if req.MerchantID > 0 {
+		channelStats.MerchantID = &req.MerchantID
+	}
+	if req.WriteoffID != nil {
+		channelStats.WriteoffID = req.WriteoffID
+	}
+
+	// 确定唯一索引列
+	var conflictColumns []clause.Column
+	conflictColumns = append(conflictColumns, clause.Column{Name: "date"}, clause.Column{Name: "pay_channel_id"})
+	if channelStats.TenantID != nil {
+		conflictColumns = append(conflictColumns, clause.Column{Name: "tenant_id"})
+	}
+	if channelStats.MerchantID != nil {
+		conflictColumns = append(conflictColumns, clause.Column{Name: "merchant_id"})
+	}
+	if channelStats.WriteoffID != nil {
+		conflictColumns = append(conflictColumns, clause.Column{Name: "writeoff_id"})
+	}
+
+	err = database.DB.Clauses(clause.OnConflict{
+		Columns: conflictColumns,
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"submit_count": gorm.Expr("submit_count + 1"),
+			"ver":          gorm.Expr("ver + 1"),
+		}),
+	}).Create(&channelStats).Error
+
+	if err != nil {
+		logger.Logger.Error("更新通道日统计 submit_count 失败",
+			zap.String("order_no", req.OrderNo),
+			zap.Int64("channel_id", req.ChannelID),
+			zap.Error(err))
+		// 不返回错误，避免影响主流程
+	}
+
+	// 4. 更新 WriteOffChannelDayStatistics 的 submit_count（核销通道日统计）
+	// 根据文档：订单创建时应该更新核销通道统计的 submit_count
+	// 参考 Python: callback_writeoff_channel_submit
+	if req.WriteoffID != nil && req.ChannelID > 0 {
+		statsService := service.NewStatisticsService()
+		writeoffChannelStats := &models.WriteOffChannelDayStatistics{
+			WriteoffID:   req.WriteoffID,
+			PayChannelID: &req.ChannelID,
+		}
+		if err := statsService.SubmitBaseDayStatistics(ctx, writeoffChannelStats, createDatetime); err != nil {
+			logger.Logger.Error("更新核销通道日统计 submit_count 失败",
+				zap.String("order_no", req.OrderNo),
+				zap.Int64("writeoff_id", *req.WriteoffID),
+				zap.Int64("channel_id", req.ChannelID),
+				zap.Error(err))
+			// 不返回错误，避免影响主流程
+		}
+	}
+
+	// 5. 更新全局日统计（submit_count 和 submit_money）
+	// 参考 Python: 全局统计也需要更新提交统计
 	globalStats := models.DayStatistics{
 		Date:        date,
 		SubmitCount: 1,
