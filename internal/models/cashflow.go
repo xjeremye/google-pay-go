@@ -50,9 +50,21 @@ func (WriteoffCashflow) TableName() string {
 }
 
 // CashflowType 流水类型常量
+// 根据 Python 项目 backend/dvadmin/agent_manager/models/cash.py 保持一致
 const (
-	CashflowTypeOrderDeduct = 1 // 订单扣减
-	CashflowTypeOrderRefund = 2 // 订单退款
-	CashflowTypeRecharge    = 3 // 充值
-	CashflowTypeWithdraw    = 4 // 提现
+	// 租户流水类型 (TenantCashFlow)
+	TenantCashflowTypeConsume       = 1 // 消费（订单手续费）
+	TenantCashflowTypeRecharge      = 2 // 充值
+	TenantCashflowTypeOtherRecharge = 3 // 其他充值
+
+	// 核销流水类型 (WriteoffCashFlow)
+	WriteoffCashflowTypeRunVolume = 1 // 跑量（订单扣减）
+	WriteoffCashflowTypeSubProfit = 7 // 下级收益（上级核销获得）
+	WriteoffCashflowTypeRefund    = 8 // 订单退款
+
+	// 向后兼容的别名（保持现有代码可用）
+	CashflowTypeOrderDeduct = WriteoffCashflowTypeRunVolume // 订单扣减（核销流水）
+	CashflowTypeOrderRefund = WriteoffCashflowTypeRefund    // 订单退款（核销流水）
+	CashflowTypeRecharge    = TenantCashflowTypeRecharge    // 充值（租户流水）
+	CashflowTypeSubProfit   = WriteoffCashflowTypeSubProfit // 下级收益（核销流水）
 )

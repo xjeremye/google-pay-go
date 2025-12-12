@@ -846,6 +846,8 @@ func (s *OrderService) getPluginPayDomain(ctx context.Context, pluginID, channel
 // 注意：这是预检查，最终检查在创建订单时使用 Redis 原子操作确保一致性
 func (s *OrderService) validateBalance(ctx context.Context, orderCtx *OrderCreateContext) *OrderError {
 	// 1. 先判断租户余额
+	// 根据文档：余额检查通过 = (trust = True) OR (trust = False AND balance >= tax)
+	// 检查的是手续费 tax，而不是订单金额 money
 	if orderCtx.Tenant != nil {
 		// 直接从租户信息中获取余额和信任标志
 		balance := orderCtx.Tenant.Balance
@@ -864,15 +866,14 @@ func (s *OrderService) validateBalance(ctx context.Context, orderCtx *OrderCreat
 		// 计算可用余额：余额 - 预占用金额
 		availableBalance := balance - preTax
 
-		// 检查余额是否足够
-		if availableBalance < int64(orderCtx.Money) {
-			// 如果 trust=false（不允许负数），则拒绝订单
-			if !trust {
-				return ErrBalanceInsufficient
-			}
-			// 如果 trust=true（允许负数），允许继续
-			// 注意：最终检查在创建订单时使用 Redis 原子操作确保一致性
+		// 检查余额是否足够（检查手续费 tax，而不是订单金额 money）
+		// 根据文档：非信任租户需要 balance >= tax
+		if !trust && availableBalance < int64(orderCtx.Tax) {
+			// 如果 trust=false（不允许负数），且余额不足，则拒绝订单
+			return ErrBalanceInsufficient
 		}
+		// 如果 trust=true（允许负数），允许继续
+		// 注意：最终检查在创建订单时使用 Redis 原子操作确保一致性
 	}
 
 	// 2. 再判断码商余额（如果存在码商ID）
@@ -1183,9 +1184,11 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 
 	// 使用 Redis 原子操作预占余额（在事务外，避免数据库锁）
 	// 这是最终检查，确保余额足够才创建订单
+	// 根据文档：租户预占的是手续费 tax，而不是订单金额 money
 	// 1. 先判断租户余额
 	if orderCtx.Tenant != nil {
-		success, _, err := s.balanceService.ReserveBalance(ctx, orderCtx.TenantID, int64(orderCtx.Money))
+		// 预占手续费 tax，而不是订单金额 money
+		success, _, err := s.balanceService.ReserveBalance(ctx, orderCtx.TenantID, int64(orderCtx.Tax))
 		if err != nil {
 			tx.Rollback()
 			return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("预占余额失败: %v", err))
@@ -1204,9 +1207,9 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 			// 检查码商余额是否足够
 			if *orderCtx.Writeoff.Balance < int64(orderCtx.Money) {
 				tx.Rollback()
-				// 如果租户余额已预占，需要释放
+				// 如果租户余额已预占，需要释放（释放的是手续费 tax）
 				if orderCtx.Tenant != nil {
-					_ = s.balanceService.ReleasePreTax(ctx, orderCtx.TenantID, int64(orderCtx.Money))
+					_ = s.balanceService.ReleasePreTax(ctx, orderCtx.TenantID, int64(orderCtx.Tax))
 				}
 				return 0, NewOrderError(ErrCodeBalanceInsufficient, "码商余额不足")
 			}
@@ -1290,9 +1293,9 @@ func (s *OrderService) createOrderAndDetail(ctx context.Context, orderCtx *Order
 
 	// 提交事务
 	if err := tx.Commit().Error; err != nil {
-		// 如果事务提交失败，需要回滚 Redis 中的预占余额
+		// 如果事务提交失败，需要回滚 Redis 中的预占余额（释放的是手续费 tax）
 		if orderCtx.Tenant != nil {
-			_ = s.balanceService.ReleasePreTax(ctx, orderCtx.TenantID, int64(orderCtx.Money))
+			_ = s.balanceService.ReleasePreTax(ctx, orderCtx.TenantID, int64(orderCtx.Tax))
 		}
 		return 0, NewOrderError(ErrCodeCreateFailed, fmt.Sprintf("提交事务失败: %v", err))
 	}
@@ -1853,16 +1856,17 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID string, st
 
 	// 如果事务提交失败，需要回滚 Redis 中的预占余额操作
 	if err != nil && err.Error() == "提交事务失败" {
-		// 查询订单信息以获取金额和商户ID
+		// 查询订单信息以获取手续费和商户ID
 		var order models.Order
-		if queryErr := database.DB.Select("merchant_id, money").Where("id = ?", orderID).First(&order).Error; queryErr == nil {
+		if queryErr := database.DB.Select("merchant_id, tax").Where("id = ?", orderID).First(&order).Error; queryErr == nil {
 			tenantID, tenantErr := tenantIDProvider.GetTenantIDByMerchantID(ctx, *order.MerchantID)
 			if tenantErr == nil && tenantID != nil {
 				switch status {
 				case models.OrderStatusPaid, models.OrderStatusFailed, models.OrderStatusCancelled:
 					// 回滚：重新预占（因为已经释放了）
 					// 注意：数据库余额扣减已回滚（事务回滚），只需要恢复 Redis 预占
-					_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Money))
+					// 预占的是手续费 tax，而不是订单金额 money
+					_, _, _ = s.balanceService.ReserveBalance(ctx, *tenantID, int64(order.Tax))
 				}
 			}
 		}
