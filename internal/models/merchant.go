@@ -65,3 +65,23 @@ type Tenant struct {
 func (Tenant) TableName() string {
 	return "dvadmin_tenant"
 }
+
+// MerchantPre 商户预付款模型
+// 根据文档：预付款用于统计商户的预付款金额（不是余额）
+// 预付款表示商户已使用的金额，订单成功时减少，订单退款时增加
+type MerchantPre struct {
+	ID             int64      `gorm:"primaryKey;autoIncrement" json:"id"`
+	MerchantID     int64      `gorm:"uniqueIndex;not null;comment:关联商户" json:"merchant_id"`
+	PrePay         int64      `gorm:"not null;default:0;comment:预付金额" json:"pre_pay"`
+	Ver            int64      `gorm:"not null;comment:版本号" json:"ver"`
+	CreateDatetime *time.Time `gorm:"comment:创建时间" json:"create_datetime,omitempty"`
+	UpdateDatetime *time.Time `gorm:"comment:修改时间" json:"update_datetime,omitempty"`
+
+	// 关联关系
+	Merchant *Merchant `gorm:"foreignKey:MerchantID" json:"merchant,omitempty"`
+}
+
+// TableName 指定表名
+func (MerchantPre) TableName() string {
+	return "dvadmin_merchant_pre"
+}

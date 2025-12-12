@@ -43,12 +43,17 @@ type UpdateStatusOptions struct {
 // 此函数可以被 service 和 mq 包复用
 func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatusOptions) error {
 	// 先查询订单信息（在事务外，减少事务时间）
+	// 需要查询 tax 字段用于租户扣费和流水记录
+	// 需要查询 merchant_id 用于商户预付处理
 	var order models.Order
-	if err := database.DB.Select("id, merchant_id, money, order_status, pay_channel_id, writeoff_id").
+	if err := database.DB.Select("id, merchant_id, money, tax, order_status, pay_channel_id, writeoff_id").
 		Where("id = ?", req.OrderID).
 		First(&order).Error; err != nil {
 		return fmt.Errorf("订单不存在: %w", err)
 	}
+
+	// 查询订单详情（用于计算商户实际收入，更新商户预付款）
+	// 注意：realMoney 在订单成功时使用，在事务中查询
 
 	// 检查订单状态是否已经变更（避免重复处理）
 	if order.OrderStatus == req.Status {
@@ -106,31 +111,58 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 			oldBalance := tenant.Balance
 			// 扣费金额是手续费 tax，而不是订单金额 money
 			taxAmount := int64(order.Tax)
-			newBalance := oldBalance - taxAmount
 
-			// 使用原子操作扣减余额（扣减手续费 tax）
-			if err := tx.Model(&models.Tenant{}).
-				Where("id = ?", *tenantID).
-				Update("balance", gorm.Expr("balance - ?", order.Tax)).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("扣减租户余额失败: %w", err)
-			}
+			// 根据文档：只有当 tenant 存在且 tax != 0 时才扣费和记录流水
+			// 如果手续费为0，不会记录流水
+			if taxAmount != 0 {
+				newBalance := oldBalance - taxAmount
 
-			// 记录租户资金流水
-			// 根据文档：租户流水 flow_type=1 表示消费（订单手续费）
-			cashflow := &models.TenantCashflow{
-				OldMoney:       oldBalance,
-				NewMoney:       newBalance,
-				ChangeMoney:    -taxAmount,                       // 负数表示扣减，扣减的是手续费
-				FlowType:       models.TenantCashflowTypeConsume, // 1=消费（订单手续费）
-				OrderID:        &req.OrderID,
-				PayChannelID:   order.PayChannelID,
-				TenantID:       *tenantID,
-				CreateDatetime: &now,
-			}
-			if err := tx.Create(cashflow).Error; err != nil {
-				tx.Rollback()
-				return fmt.Errorf("记录租户资金流水失败: %w", err)
+				// 使用原子操作扣减余额（扣减手续费 tax）
+				if err := tx.Model(&models.Tenant{}).
+					Where("id = ?", *tenantID).
+					Update("balance", gorm.Expr("balance - ?", order.Tax)).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("扣减租户余额失败: %w", err)
+				}
+
+				// 重新查询扣减后的余额（与 Python 代码保持一致）
+				var updatedTenant models.Tenant
+				if err := tx.Select("balance").Where("id = ?", *tenantID).First(&updatedTenant).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("查询扣减后余额失败: %w", err)
+				}
+				newBalance = updatedTenant.Balance
+
+				// 记录租户资金流水
+				// 根据文档：租户流水 flow_type=1 表示消费（订单手续费）
+				// 只有当 tax != 0 时才记录流水
+				cashflow := &models.TenantCashflow{
+					OldMoney:       oldBalance,
+					NewMoney:       newBalance,
+					ChangeMoney:    -taxAmount,                       // 负数表示扣减，扣减的是手续费
+					FlowType:       models.TenantCashflowTypeConsume, // 1=消费（订单手续费）
+					OrderID:        &req.OrderID,
+					PayChannelID:   order.PayChannelID,
+					TenantID:       *tenantID,
+					CreateDatetime: &now,
+				}
+				if err := tx.Create(cashflow).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("记录租户资金流水失败: %w", err)
+				}
+
+				logger.Logger.Info("订单支付成功，已扣减租户余额",
+					zap.String("order_id", req.OrderID),
+					zap.Int64("tenant_id", *tenantID),
+					zap.Int64("old_balance", oldBalance),
+					zap.Int64("new_balance", newBalance),
+					zap.Int("tax", order.Tax),
+					zap.Int("money", order.Money))
+			} else {
+				// 手续费为0，不扣费也不记录流水
+				logger.Logger.Debug("租户手续费为0，跳过扣费和流水记录",
+					zap.String("order_id", req.OrderID),
+					zap.Int64("tenant_id", *tenantID))
 			}
 
 			// 从 Redis 释放预占余额（释放的是手续费 tax）
@@ -142,13 +174,7 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 					zap.Error(err))
 			}
 
-			logger.Logger.Info("订单支付成功，已扣减租户余额",
-				zap.String("order_id", req.OrderID),
-				zap.Int64("tenant_id", *tenantID),
-				zap.Int64("old_balance", oldBalance),
-				zap.Int64("new_balance", newBalance),
-				zap.Int("tax", order.Tax),
-				zap.Int("money", order.Money))
+			// 注意：日志已在 taxAmount != 0 的分支中记录
 
 		case models.OrderStatusFailed, models.OrderStatusClosed:
 			// 订单失败/取消/过期/关闭：只从 Redis 释放预占，不扣减余额
@@ -233,11 +259,12 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 				realDeductAmount := int64(order.Money) - finalWriteoffTaxAmount
 
 				// 记录码商资金流水（无论余额是否为 NULL，都需要记录流水以便追踪）
+				// 根据文档：old_money = before if before is not None else 0
+				// new_money = writeoff.balance if writeoff.balance is not None else 0（扣减后的余额）
 				var oldBalance, newBalance int64
 				if writeoff.Balance != nil {
-					// 有余额限制：扣减余额并记录实际余额变化
+					// 有余额限制：保存扣减前的余额
 					oldBalance = *writeoff.Balance
-					newBalance = oldBalance - realDeductAmount
 
 					// 使用原子操作扣减余额（扣减实际扣除金额，而不是订单金额）
 					if err := tx.Model(&models.Writeoff{}).
@@ -246,8 +273,21 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 						tx.Rollback()
 						return fmt.Errorf("扣减码商余额失败: %w", err)
 					}
+
+					// 重新查询扣减后的余额（与 Python 代码保持一致）
+					var updatedWriteoff models.Writeoff
+					if err := tx.Select("balance").Where("id = ?", finalWriteoff.ID).First(&updatedWriteoff).Error; err != nil {
+						tx.Rollback()
+						return fmt.Errorf("查询扣减后余额失败: %w", err)
+					}
+					if updatedWriteoff.Balance != nil {
+						newBalance = *updatedWriteoff.Balance
+					} else {
+						newBalance = 0
+					}
 				} else {
 					// 余额无限制：old_money 和 new_money 都设置为 0（表示无限制）
+					// 根据文档：如果 balance is None，则 old_money=0, new_money=0
 					oldBalance = 0
 					newBalance = 0
 				}
@@ -304,11 +344,12 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 					}
 
 					// 记录上级核销资金流水（无论余额是否为 NULL，都需要记录流水）
+					// 根据文档：old_money = before if before is not None else 0
+					// new_money = writeoff.balance if writeoff.balance is not None else 0（增加后的余额）
 					var oldBalance, newBalance int64
 					if writeoff.Balance != nil {
-						// 有余额限制：增加余额并记录实际余额变化
+						// 有余额限制：保存增加前的余额
 						oldBalance = *writeoff.Balance
-						newBalance = oldBalance + parentTaxAmount // 正数表示增加
 
 						// 使用原子操作增加余额（上级核销获得收益）
 						if err := tx.Model(&models.Writeoff{}).
@@ -317,8 +358,21 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 							tx.Rollback()
 							return fmt.Errorf("增加上级核销余额失败: %w", err)
 						}
+
+						// 重新查询增加后的余额（与 Python 代码保持一致）
+						var updatedWriteoff models.Writeoff
+						if err := tx.Select("balance").Where("id = ?", parentWriteoff.ID).First(&updatedWriteoff).Error; err != nil {
+							tx.Rollback()
+							return fmt.Errorf("查询增加后余额失败: %w", err)
+						}
+						if updatedWriteoff.Balance != nil {
+							newBalance = *updatedWriteoff.Balance
+						} else {
+							newBalance = 0
+						}
 					} else {
 						// 余额无限制：old_money 和 new_money 都设置为 0（表示无限制）
+						// 根据文档：如果 balance is None，则 old_money=0, new_money=0
 						oldBalance = 0
 						newBalance = 0
 					}
@@ -357,6 +411,97 @@ func UpdateStatus(ctx context.Context, req UpdateStatusRequest, opts UpdateStatu
 			// 订单失败/取消/过期：码商余额不需要处理（码商没有预占余额的概念）
 			// 码商余额只在支付成功时扣减
 			// 注意：OrderStatusCancelled 是 OrderStatusClosed 的别名，值相同，所以不需要单独列出
+		}
+	}
+
+	// 处理商户预付款（在事务中，确保一致性）
+	// 根据文档：
+	// - 订单成功时：更新商户预付款（减少预付款），新预付款 = 原预付款 + (-real_money) = 原预付款 - real_money
+	// - 订单退款时：更新商户预付款（增加预付款），新预付款 = 原预付款 + real_money
+	if (req.Status == models.OrderStatusPaid || req.Status == models.OrderStatusRefunded) && order.MerchantID != nil {
+		// 查询订单详情以计算实际收入
+		var orderDetail models.OrderDetail
+		if err := tx.Select("notify_money, merchant_tax").
+			Where("order_id = ?", req.OrderID).
+			First(&orderDetail).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("查询订单详情失败: %w", err)
+		}
+
+		// 计算实际收入：实际收入 = 通知金额 - 商户手续费
+		// 根据文档：real_money = notify_money - merchant_tax
+		realMoney := int64(orderDetail.NotifyMoney) - int64(orderDetail.MerchantTax)
+
+		// 只有当实际收入大于0时才更新预付款
+		if realMoney > 0 {
+			// 根据订单状态决定预付款变更方向
+			var changeAmount int64
+			var actionDesc string
+			if req.Status == models.OrderStatusPaid {
+				// 订单成功：减少预付款（传入负数）
+				changeAmount = -realMoney
+				actionDesc = "订单支付成功，减少商户预付款"
+			} else if req.Status == models.OrderStatusRefunded {
+				// 订单退款：增加预付款（传入正数）
+				changeAmount = realMoney
+				actionDesc = "订单退款，增加商户预付款"
+			} else {
+				// 其他状态不处理
+				return nil
+			}
+
+			// 查询或创建商户预付款记录
+			var merchantPre models.MerchantPre
+			if err := tx.Where("merchant_id = ?", *order.MerchantID).First(&merchantPre).Error; err != nil {
+				if err == gorm.ErrRecordNotFound {
+					// 如果不存在，创建新的预付款记录
+					// 注意：订单退款时不应该创建新记录（因为订单成功时应该已经创建）
+					// 但如果订单成功时没有创建，这里也会创建
+					merchantPre = models.MerchantPre{
+						MerchantID: *order.MerchantID,
+						PrePay:     changeAmount, // 初始值
+						Ver:        1,
+					}
+					if err := tx.Create(&merchantPre).Error; err != nil {
+						tx.Rollback()
+						return fmt.Errorf("创建商户预付款失败: %w", err)
+					}
+					logger.Logger.Info(actionDesc,
+						zap.String("order_id", req.OrderID),
+						zap.Int64("merchant_id", *order.MerchantID),
+						zap.Int64("pre_pay", merchantPre.PrePay),
+						zap.Int64("real_money", realMoney),
+						zap.Int64("change_amount", changeAmount))
+				} else {
+					tx.Rollback()
+					return fmt.Errorf("查询商户预付款失败: %w", err)
+				}
+			} else {
+				// 更新预付款：增加或减少
+				// 根据文档：m.pre_pay += real_money（real_money 为负数时减少，为正数时增加）
+				oldPrePay := merchantPre.PrePay
+				if err := tx.Model(&models.MerchantPre{}).
+					Where("merchant_id = ?", *order.MerchantID).
+					Update("pre_pay", gorm.Expr("pre_pay + ?", changeAmount)).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("更新商户预付款失败: %w", err)
+				}
+
+				// 重新查询更新后的预付款
+				var updatedMerchantPre models.MerchantPre
+				if err := tx.Select("pre_pay").Where("merchant_id = ?", *order.MerchantID).First(&updatedMerchantPre).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("查询更新后预付款失败: %w", err)
+				}
+
+				logger.Logger.Info(actionDesc,
+					zap.String("order_id", req.OrderID),
+					zap.Int64("merchant_id", *order.MerchantID),
+					zap.Int64("old_pre_pay", oldPrePay),
+					zap.Int64("new_pre_pay", updatedMerchantPre.PrePay),
+					zap.Int64("real_money", realMoney),
+					zap.Int64("change_amount", changeAmount))
+			}
 		}
 	}
 
